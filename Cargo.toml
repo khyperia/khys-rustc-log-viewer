@@ -1,0 +1,13 @@
+[package]
+name = "viewlog"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "*"
+eframe = "*"
+env_logger = "*"
+facet = "*"
+facet-json = "*"
+libc = "*"
+yoke = { version = "*", features = ["derive"] }

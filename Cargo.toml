@@ -7,7 +7,5 @@ edition = "2024"
 anyhow = "*"
 eframe = "*"
 env_logger = "*"
-facet = "*"
-facet-json = "*"
 libc = "*"
 yoke = { version = "*", features = ["derive"] }

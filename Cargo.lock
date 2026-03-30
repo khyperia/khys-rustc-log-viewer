@@ -705,12 +705,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "const-fnv1a-hash"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32b13ea120a812beba79e34316b3942a857c86ec1593cb34f27bb28272ce2cca"
-
-[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -904,7 +898,7 @@ dependencies = [
  "log",
  "nohash-hasher",
  "profiling",
- "smallvec 1.15.1",
+ "smallvec",
  "unicode-segmentation",
 ]
 
@@ -1044,7 +1038,7 @@ dependencies = [
  "profiling",
  "self_cell",
  "skrifa",
- "smallvec 1.15.1",
+ "smallvec",
  "vello_cpu",
 ]
 
@@ -1104,142 +1098,6 @@ checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
 dependencies = [
  "event-listener",
  "pin-project-lite",
-]
-
-[[package]]
-name = "facet"
-version = "0.44.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4aa60b7d3d49d30f477f9490b7fc3ce42009b5b626b625b0356742884c493a11"
-dependencies = [
- "autocfg",
- "facet-core",
- "facet-macros",
-]
-
-[[package]]
-name = "facet-core"
-version = "0.44.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11f9ee47507f15c18243a8cba3b2a85b71176173f0097e9164a54dd4e4e3e4ce"
-dependencies = [
- "autocfg",
- "const-fnv1a-hash",
- "iddqd",
- "impls",
-]
-
-[[package]]
-name = "facet-dessert"
-version = "0.44.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fb18a3e7ee90139051f679390662ae158439c1564b73b482676b9a3862d13c0"
-dependencies = [
- "facet-core",
- "facet-reflect",
-]
-
-[[package]]
-name = "facet-format"
-version = "0.44.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d87b44b7183a982f8c9889b7ec50bf8f1a38318a77069084436cc908bb1e5e96"
-dependencies = [
- "facet-core",
- "facet-dessert",
- "facet-path",
- "facet-reflect",
- "facet-solver",
-]
-
-[[package]]
-name = "facet-json"
-version = "0.44.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81791a228a3d57e2e982430f92ad2a219feaca8f21234316a830246594f64e84"
-dependencies = [
- "facet",
- "facet-core",
- "facet-format",
- "facet-reflect",
- "memchr",
-]
-
-[[package]]
-name = "facet-macro-parse"
-version = "0.44.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e77becc35b3b3008e7b3ef23356954e46561177316aff0a92c73fc6ddb2a15a0"
-dependencies = [
- "facet-macro-types",
- "proc-macro2",
- "quote",
-]
-
-[[package]]
-name = "facet-macro-types"
-version = "0.44.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e600db5983cdad99db3b34adfa20b546d80f21ab8feecd35d40bbbfbcf53b5c"
-dependencies = [
- "proc-macro2",
- "quote",
- "unsynn",
-]
-
-[[package]]
-name = "facet-macros"
-version = "0.44.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3a7015e119aa043740dc8aee6b1b70e26b6616e1701b329496bf04990f44133"
-dependencies = [
- "facet-macros-impl",
-]
-
-[[package]]
-name = "facet-macros-impl"
-version = "0.44.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cbb5e6f6cc64210ab12aa625b014db78d34d6a3b63d1011382c141518a1e1f78"
-dependencies = [
- "facet-macro-parse",
- "facet-macro-types",
- "proc-macro2",
- "quote",
- "strsim",
- "unsynn",
-]
-
-[[package]]
-name = "facet-path"
-version = "0.44.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77e7b83cb0de7c00d6e76f08d36b047d6cb9efc39e10744dbcf7a4a5a19c4903"
-dependencies = [
- "facet-core",
-]
-
-[[package]]
-name = "facet-reflect"
-version = "0.44.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9cc255bd928399489868fdddec09e69073d622432cc2b52cfa3c3a5d811305c"
-dependencies = [
- "facet-core",
- "facet-path",
- "hashbrown 0.16.1",
- "smallvec 2.0.0-alpha.12",
-]
-
-[[package]]
-name = "facet-solver"
-version = "0.44.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4d2427360875510d60267f4bb132f47aa4f5714896be9ca11c516f14542118d"
-dependencies = [
- "facet-core",
- "facet-reflect",
- "strsim",
 ]
 
 [[package]]
@@ -1645,7 +1503,7 @@ dependencies = [
  "icu_normalizer_data",
  "icu_properties",
  "icu_provider",
- "smallvec 1.15.1",
+ "smallvec",
  "zerovec",
 ]
 
@@ -1691,26 +1549,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "iddqd"
-version = "0.3.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b215e67ed1d1a4b1702acd787c487d16e4c977c5dcbcc4587bdb5ea26b6ce06"
-dependencies = [
- "allocator-api2",
- "equivalent",
- "foldhash 0.2.0",
- "hashbrown 0.16.1",
- "rustc-hash 2.1.1",
-]
-
-[[package]]
 name = "idna"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b0875f23caa03898994f6ddc501886a45c7d3d62d04d2d90788d47be1b1e4de"
 dependencies = [
  "idna_adapter",
- "smallvec 1.15.1",
+ "smallvec",
  "utf8_iter",
 ]
 
@@ -1737,12 +1582,6 @@ dependencies = [
  "png",
  "tiff",
 ]
-
-[[package]]
-name = "impls"
-version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a46645bbd70538861a90d0f26c31537cdf1e44aae99a794fb75a664b70951bc"
 
 [[package]]
 name = "indexmap"
@@ -1900,7 +1739,7 @@ checksum = "7564e90fe3c0d5771e1f0bc95322b21baaeaa0d9213fa6a0b61c99f8b17b3bfb"
 dependencies = [
  "arrayvec",
  "euclid",
- "smallvec 1.15.1",
+ "smallvec",
 ]
 
 [[package]]
@@ -2025,12 +1864,6 @@ dependencies = [
  "num-traits",
  "pxfm",
 ]
-
-[[package]]
-name = "mutants"
-version = "0.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc0287524726960e07b119cebd01678f852f147742ae0d925e6a520dca956126"
 
 [[package]]
 name = "naga"
@@ -2510,7 +2343,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "redox_syscall 0.5.18",
- "smallvec 1.15.1",
+ "smallvec",
  "windows-link",
 ]
 
@@ -2524,7 +2357,7 @@ dependencies = [
  "color",
  "kurbo",
  "linebender_resource_handle",
- "smallvec 1.15.1",
+ "smallvec",
 ]
 
 [[package]]
@@ -3070,12 +2903,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
-name = "smallvec"
-version = "2.0.0-alpha.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef784004ca8777809dcdad6ac37629f0a97caee4c685fcea805278d81dd8b857"
-
-[[package]]
 name = "smithay-client-toolkit"
 version = "0.19.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3173,12 +3000,6 @@ name = "strict-num"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6637bab7722d379c8b41ba849228d680cc12d0a45ba1fa2b48f2a30577a06731"
-
-[[package]]
-name = "strsim"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "syn"
@@ -3420,17 +3241,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
-name = "unsynn"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "501a7adf1a4bd9951501e5c66621e972ef8874d787628b7f90e64f936ef7ec0a"
-dependencies = [
- "mutants",
- "proc-macro2",
- "rustc-hash 2.1.1",
-]
-
-[[package]]
 name = "url"
 version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3477,7 +3287,7 @@ dependencies = [
  "log",
  "peniko",
  "skrifa",
- "smallvec 1.15.1",
+ "smallvec",
 ]
 
 [[package]]
@@ -3504,8 +3314,6 @@ dependencies = [
  "anyhow",
  "eframe",
  "env_logger",
- "facet",
- "facet-json",
  "libc",
  "yoke",
 ]
@@ -3598,7 +3406,7 @@ dependencies = [
  "downcast-rs",
  "rustix 1.1.4",
  "scoped-tls",
- "smallvec 1.15.1",
+ "smallvec",
  "wayland-sys",
 ]
 
@@ -3785,7 +3593,7 @@ dependencies = [
  "portable-atomic",
  "profiling",
  "raw-window-handle",
- "smallvec 1.15.1",
+ "smallvec",
  "static_assertions",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -3818,7 +3626,7 @@ dependencies = [
  "profiling",
  "raw-window-handle",
  "rustc-hash 1.1.0",
- "smallvec 1.15.1",
+ "smallvec",
  "thiserror 2.0.18",
  "wgpu-core-deps-apple",
  "wgpu-core-deps-emscripten",
@@ -3907,7 +3715,7 @@ dependencies = [
  "raw-window-handle",
  "raw-window-metal",
  "renderdoc-sys",
- "smallvec 1.15.1",
+ "smallvec",
  "thiserror 2.0.18",
  "wasm-bindgen",
  "wayland-sys",

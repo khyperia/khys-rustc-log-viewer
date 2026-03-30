@@ -8,9 +8,13 @@ use eframe::{
 use std::{
     borrow::Cow,
     collections::HashMap,
+    error::Error,
+    fmt::{Debug, Display},
     fs::File,
     io::{BufRead, BufReader},
     path::Path,
+    str::{Chars, FromStr},
+    time::Instant,
 };
 use yoke::Yoke;
 
@@ -39,7 +43,12 @@ struct AppState {
 
 impl App {
     fn new(_cc: &CreationContext) -> anyhow::Result<Self> {
-        let messages = read_lines(Path::new("/home/khyperia/rustc-log.txt"))?;
+        let start = Instant::now();
+        let messages = read_lines(Path::new("/home/khyperia/rustc-log.txt"), |s| {
+            custom_parse(s)
+        })?;
+        let end = Instant::now();
+        println!("{:?}", end - start);
         Ok(App {
             messages,
             scroll_value: Default::default(),
@@ -287,15 +296,19 @@ impl FilterKind {
     }
 }
 
-fn read_lines(path: &Path) -> anyhow::Result<Vec<Message>> {
+fn read_lines<E: Error + Send + Sync + 'static>(
+    path: &Path,
+    parse: impl for<'a> Fn(&'a str) -> Result<ParsedMessage<'a>, E>,
+) -> anyhow::Result<Vec<Message>> {
     let file = File::open(path).unwrap();
     let reader = BufReader::new(file);
     let mut parent_stack = vec![];
+    let parse = &parse;
     reader
         .lines()
         .enumerate()
-        .take(1000)
-        .map(|(i, s)| Message::new(s?, i, &mut parent_stack))
+        //.take(100000)
+        .map(move |(i, s)| Message::new(s?, i, &mut parent_stack, parse))
         .collect()
 }
 
@@ -342,15 +355,27 @@ struct MessageState {
 }
 
 impl Message {
-    fn new(line: String, index: usize, parent_stack: &mut Vec<usize>) -> anyhow::Result<Self> {
-        let yoke = Yoke::try_attach_to_cart(line, |l| facet_json::from_str_borrowed(l))?;
+    fn new<E: Error + Send + Sync + 'static>(
+        line: String,
+        index: usize,
+        parent_stack: &mut Vec<usize>,
+        parse: impl for<'a> FnOnce(&'a str) -> Result<ParsedMessage<'a>, E>,
+    ) -> anyhow::Result<Self> {
+        let yoke = Yoke::try_attach_to_cart(line, |l| parse(l))?;
         let parsed: &ParsedMessage = yoke.get();
-        let msg = parsed.fields.get("message").map(|v| v as &str);
+        // TODO: use the getter
+        let msg = parsed.fields.get("message").and_then(|v| {
+            if let SpanValue::String(v) = v {
+                Some(v as &str)
+            } else {
+                None
+            }
+        });
+        let parent = parent_stack.last().cloned();
         if msg == Some("exit") {
             parent_stack.pop();
         }
         let self_indent = parent_stack.len();
-        let parent = parent_stack.last().cloned();
         if msg == Some("enter") {
             parent_stack.push(index);
         }
@@ -371,25 +396,15 @@ impl Message {
         self.yoke.get()
     }
 
-    // fn parsed_mut<F, R>(&mut self, func: F) -> R
-    // where
-    //     F: 'static + for<'b> FnOnce(&'b mut ParsedMessage<'_>) -> R,
-    //     R: 'static,
-    // {
-    //     self.yoke.with_mut_return(func)
-    // }
-
     fn hop_message(&self) -> Option<&str> {
-        self.parsed().fields.get("message").map(|v| &**v)
+        self.parsed().fields.get("message").and_then(|v| {
+            if let SpanValue::String(v) = v {
+                Some(v as &str)
+            } else {
+                None
+            }
+        })
     }
-
-    // fn hop_kind(&self) -> HopKind {
-    //     match (self.parsed().hop_index, self.hop_message()) {
-    //         (Some(idx), Some("enter")) => HopKind::Enter(idx),
-    //         (Some(idx), Some("exit")) => HopKind::Exit(idx),
-    //         _ => HopKind::None,
-    //     }
-    // }
 
     fn is_displayed(&self, messages: &[Message], app_state: &AppState) -> bool {
         // if self.state.hide_self {
@@ -606,10 +621,7 @@ impl Message {
         parsed.timestamp.contains(search)
             || parsed.target.contains(search)
             || parsed.filename.contains(search)
-            || parsed
-                .fields
-                .iter()
-                .any(|(k, v)| k.contains(search) || v.contains(search))
+            || sp(&parsed.fields, search)
             || parsed.span.as_ref().is_some_and(|m| sp(m, search))
             || parsed
                 .spans
@@ -631,12 +643,11 @@ fn level(job: &mut LayoutJob, sp: f32, level: &Level) {
     job.append(text, sp, fmt)
 }
 
-#[derive(Default, facet::Facet, yoke::Yokeable)]
-#[facet(deny_unknown_fields)]
+#[derive(Default, yoke::Yokeable)]
 struct ParsedMessage<'a> {
     timestamp: Cow<'a, str>,
     level: Level,
-    fields: HashMap<Cow<'a, str>, Cow<'a, str>>,
+    fields: HashMap<Cow<'a, str>, SpanValue<'a>>,
     target: Cow<'a, str>,
     filename: Cow<'a, str>,
     line_number: u64,
@@ -645,13 +656,25 @@ struct ParsedMessage<'a> {
 }
 
 #[allow(clippy::upper_case_acronyms)]
-#[derive(Default, facet::Facet)]
-#[repr(C)]
+#[derive(Default)]
 enum Level {
     #[default]
     TRACE,
     DEBUG,
     INFO,
+}
+
+impl TryFrom<&str> for Level {
+    type Error = ();
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "TRACE" => Ok(Self::TRACE),
+            "DEBUG" => Ok(Self::DEBUG),
+            "INFO" => Ok(Self::INFO),
+            _ => Err(()),
+        }
+    }
 }
 
 trait CowStrable {
@@ -674,11 +697,178 @@ impl CowStrable for SpanValue<'_> {
     }
 }
 
-#[derive(facet::Facet)]
-#[facet(untagged)]
-#[repr(u8)]
 enum SpanValue<'a> {
     Bool(bool),
     Int(i64),
     String(Cow<'a, str>),
+}
+
+#[derive(Debug)]
+struct ParseError;
+
+impl Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("parse error")
+    }
+}
+
+impl Error for ParseError {}
+
+fn custom_parse<'a>(s: &'a str) -> Result<ParsedMessage<'a>, ParseError> {
+    custom_parse2(&mut s.chars()).map_err(|()| ParseError)
+}
+
+fn custom_parse2<'a>(iter: &mut Chars<'a>) -> Result<ParsedMessage<'a>, ()> {
+    let mut result = ParsedMessage::default();
+
+    expect(iter, '{')?;
+
+    loop {
+        let key = parse_string(iter)?;
+        expect(iter, ':')?;
+        match &*key {
+            "timestamp" => result.timestamp = parse_string(iter)?,
+            "level" => result.level = Level::try_from(&*parse_string(iter)?).map_err(|_| ())?,
+            "fields" => parse_dict(iter, &mut result.fields)?,
+            "target" => result.target = parse_string(iter)?,
+            "filename" => result.filename = parse_string(iter)?,
+            "line_number" => result.line_number = parse_number(iter)?,
+            "span" => parse_dict(iter, result.span.get_or_insert_with(Default::default))?,
+            "spans" => parse_dicts(iter, result.spans.get_or_insert_with(Default::default))?,
+            _ => panic!("unexpected key {key}"),
+        }
+        match iter.next().ok_or(())? {
+            '}' => break Ok(result),
+            ',' => continue,
+            ch => panic!("unexpected ch {ch}"),
+        }
+    }
+}
+
+fn parse_dicts<'a>(
+    iter: &mut Chars<'a>,
+    result: &mut Vec<HashMap<Cow<'a, str>, SpanValue<'a>>>,
+) -> Result<(), ()> {
+    expect(iter, '[')?;
+    let mut iter_clone = iter.clone();
+    if iter_clone.next() == Some(']') {
+        *iter = iter_clone;
+        return Ok(());
+    }
+    loop {
+        let mut single = Default::default();
+        parse_dict(iter, &mut single)?;
+        result.push(single);
+        match iter.next().ok_or(())? {
+            ']' => break Ok(()),
+            ',' => continue,
+            _ => break Err(()),
+        }
+    }
+}
+
+fn parse_dict<'a>(
+    iter: &mut Chars<'a>,
+    result: &mut HashMap<Cow<'a, str>, SpanValue<'a>>,
+) -> Result<(), ()> {
+    expect(iter, '{')?;
+    loop {
+        let key = parse_string(iter)?;
+        expect(iter, ':')?;
+        let start = iter.as_str();
+        let value = match iter.next().ok_or(())? {
+            '"' => SpanValue::String(parse_string_after_quote(iter)?),
+            't' => {
+                expect(iter, 'r')?;
+                expect(iter, 'u')?;
+                expect(iter, 'e')?;
+                SpanValue::Bool(true)
+            }
+            'f' => {
+                expect(iter, 'a')?;
+                expect(iter, 'l')?;
+                expect(iter, 's')?;
+                expect(iter, 'e')?;
+                SpanValue::Bool(false)
+            }
+            ch if ch.is_ascii_digit() => SpanValue::Int(parse_number_after_digit(start, iter)?),
+            ch => panic!("unexpected ch {ch}"),
+        };
+        result.insert(key, value);
+        match iter.next().ok_or(())? {
+            '}' => break Ok(()),
+            ',' => continue,
+            ch => panic!("unexpected ch {ch}"),
+        }
+    }
+}
+
+fn parse_string<'a>(iter: &mut Chars<'a>) -> Result<Cow<'a, str>, ()> {
+    expect(iter, '"')?;
+    parse_string_after_quote(iter)
+}
+
+fn parse_string_after_quote<'a>(iter: &mut Chars<'a>) -> Result<Cow<'a, str>, ()> {
+    let str_begin = iter.as_str();
+    let Some(quot) = str_begin.find('"') else {
+        return Err(());
+    };
+    let str_to_quot = &str_begin[..quot];
+    if let Some(_backslash) = str_to_quot.find('\\') {
+    } else {
+        *iter = str_begin[(quot + 1)..].chars();
+        return Ok(Cow::Borrowed(str_to_quot));
+    }
+    // approx. 1.43% of strings had an escape in the dataset I used to test
+    loop {
+        let ch = iter.next().ok_or(())?;
+        if ch == '"' {
+            let str_end = iter.as_str();
+            let len = str_begin.len() - (str_end.len() + 1);
+            break Ok(Cow::Borrowed(&str_begin[..len]));
+        } else if ch == '\\' {
+            let Some(_escaped_ch) = iter.next() else {
+                panic!("unexpected eof: {ch}");
+            };
+        }
+    }
+}
+
+fn parse_number<'a, T: FromStr>(iter: &mut Chars<'a>) -> Result<T, ()>
+where
+    <T as FromStr>::Err: Debug,
+{
+    let start = iter.as_str();
+    let ch = iter.next().ok_or(())?;
+    if ch.is_ascii_digit() {
+        parse_number_after_digit(start, iter)
+    } else {
+        Err(())
+    }
+}
+
+fn parse_number_after_digit<'a, T: FromStr>(start: &'a str, iter: &mut Chars<'a>) -> Result<T, ()>
+where
+    <T as FromStr>::Err: Debug,
+{
+    let slice = loop {
+        let mut cloned = iter.clone();
+        let Some(ch) = cloned.next() else {
+            break start;
+        };
+        if !ch.is_ascii_digit() {
+            let len = start.len() - iter.as_str().len();
+            break &start[..len];
+        }
+        *iter = cloned;
+    };
+    T::from_str(slice).map_err(|_| ())
+}
+
+fn expect<'a>(iter: &mut Chars<'a>, ch: char) -> Result<(), ()> {
+    if let Some(got) = iter.next() {
+        if got == ch { Ok(()) } else { Err(()) }
+    } else {
+        Err(())
+    }
 }

@@ -1,8 +1,8 @@
 use eframe::{
     CreationContext,
     egui::{
-        CentralPanel, Color32, ComboBox, FontId, Frame, Key, Modifiers, Panel, TextFormat, Ui,
-        UiBuilder, text::LayoutJob,
+        CentralPanel, Color32, ComboBox, FontId, Frame, InputState, Key, Modifiers, Panel,
+        TextFormat, Ui, UiBuilder, text::LayoutJob,
     },
 };
 use std::{
@@ -17,6 +17,17 @@ use std::{
     time::Instant,
 };
 use yoke::Yoke;
+
+const GREY: Color32 = Color32::from_rgb(142, 142, 142);
+const WHITE: Color32 = Color32::from_rgb(216, 216, 216);
+const BLUE: Color32 = Color32::from_rgb(106, 159, 181);
+const PURPLE: Color32 = Color32::from_rgb(170, 117, 159);
+const GREEN: Color32 = Color32::from_rgb(144, 169, 89);
+const RED: Color32 = Color32::from_rgb(172, 66, 68);
+const CYAN: Color32 = Color32::from_rgb(117, 181, 170);
+const YELLOW: Color32 = Color32::from_rgb(244, 191, 117);
+const HLSEARCH: Color32 = Color32::from_rgb(0, 92, 128);
+const INDENT: f32 = 8.0;
 
 fn main() -> eframe::Result {
     env_logger::init();
@@ -38,7 +49,37 @@ struct AppState {
     entering_search_text: bool,
     search: String,
     search_onscreen: bool,
+    timestamps: bool,
+    log_levels: bool,
+    targets: bool,
     filters: Vec<Filter>,
+}
+
+impl AppState {
+    fn new() -> Self {
+        Self {
+            log_levels: true,
+            targets: true,
+            ..Default::default()
+        }
+    }
+
+    fn matches_search(&self, s: &str) -> bool {
+        if self.search.is_empty() {
+            false
+        } else {
+            s.contains(&self.search)
+        }
+    }
+
+    fn vdict_matches_search(&self, list: &[HashMap<Cow<str>, SpanValue>]) -> bool {
+        if self.search.is_empty() {
+            false
+        } else {
+            list.iter()
+                .any(|map| dict_matches_search(map, &self.search))
+        }
+    }
 }
 
 impl App {
@@ -52,7 +93,7 @@ impl App {
         Ok(App {
             messages,
             scroll_value: Default::default(),
-            state: Default::default(),
+            state: AppState::new(),
         })
     }
 
@@ -60,7 +101,7 @@ impl App {
     fn next_search(&self, index: usize) -> Option<usize> {
         (index..self.messages.len())
             .chain(0..index)
-            .find(|&index| self.messages[index].matches_search(&self.state.search))
+            .find(|&index| self.next_search_raw(index))
     }
 
     // silly nit: index is *exclusive* here
@@ -68,7 +109,12 @@ impl App {
         (index..self.messages.len())
             .chain(0..index)
             .rev()
-            .find(|&index| self.messages[index].matches_search(&self.state.search))
+            .find(|&index| self.next_search_raw(index))
+    }
+
+    fn next_search_raw(&self, index: usize) -> bool {
+        self.messages[index].is_displayed(&self.messages, &self.state)
+            && self.messages[index].matches_search(&self.state.search)
     }
 }
 
@@ -76,11 +122,23 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let mut opened_search = false;
         ui.input_mut(|input| {
+            scroller_mouse_input(input, &mut self.scroll_value);
             if self.state.entering_search_text {
                 if input.consume_key(Modifiers::NONE, Key::Escape) {
                     self.state.entering_search_text = false;
                 }
             } else {
+                scroller_key_input(
+                    input,
+                    &mut self.scroll_value,
+                    self.messages.len(),
+                    ui.clip_rect().height(),
+                );
+                if input.consume_key(Modifiers::NONE, Key::Slash) {
+                    self.state.entering_search_text = true;
+                    self.state.search.clear();
+                    opened_search = true;
+                }
                 if !self.state.search.is_empty() {
                     if input.consume_key(Modifiers::NONE, Key::Escape) {
                         self.state.search = String::new();
@@ -98,10 +156,6 @@ impl eframe::App for App {
                         self.scroll_value.index = index;
                         self.scroll_value.pixel_offset = 0.0;
                     }
-                }
-                if input.consume_key(Modifiers::NONE, Key::Slash) {
-                    self.state.entering_search_text = true;
-                    opened_search = true;
                 }
             }
         });
@@ -129,6 +183,11 @@ impl eframe::App for App {
         }
         Panel::top("filter panel").show_inside(ui, |ui| {
             let mut id_salt = 0;
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.state.timestamps, "timestamps");
+                ui.checkbox(&mut self.state.log_levels, "log levels");
+                ui.checkbox(&mut self.state.targets, "targets");
+            });
             self.state.filters.retain_mut(|q| {
                 let salt = id_salt;
                 id_salt += 1;
@@ -142,16 +201,22 @@ impl eframe::App for App {
         self.state.search_onscreen = false;
         let panel = CentralPanel::default().frame(Frame::new().fill(Color32::from_rgb(38, 50, 56)));
         panel.show_inside(ui, |ui| {
-            big_scroller(ui, &mut self.scroll_value, |ui, index| {
-                if index < self.messages.len() {
+            big_scroller(
+                ui,
+                &mut self.scroll_value,
+                self.messages.len(),
+                |ui, index| {
                     if self.messages[index].is_displayed(&self.messages, &self.state) {
-                        self.messages[index].ui_outer(&mut self.state, ui);
+                        if let Some(parent) = self.messages[index].parent {
+                            let [message, parent] =
+                                self.messages.get_disjoint_mut([index, parent]).unwrap();
+                            message.ui_outer(Some(parent), &mut self.state, ui);
+                        } else {
+                            self.messages[index].ui_outer(None, &mut self.state, ui);
+                        }
                     }
-                    Some(())
-                } else {
-                    None
-                }
-            });
+                },
+            );
         });
         if !self.state.search.is_empty()
             && !self.state.search_onscreen
@@ -170,46 +235,63 @@ struct ScrollValue {
     pixel_offset: f32,
 }
 
+fn scroller_mouse_input(input: &mut InputState, value: &mut ScrollValue) {
+    let scroll_mult = -4.0; // inverted?
+    value.pixel_offset += input.smooth_scroll_delta.y * scroll_mult;
+    input.smooth_scroll_delta.y = 0.0;
+}
+
+fn scroller_key_input(input: &mut InputState, value: &mut ScrollValue, len: usize, ui_height: f32) {
+    if input.consume_key(Modifiers::NONE, Key::J) {
+        value.pixel_offset += 20.0; // TODO: how to get line height?
+    }
+    if input.consume_key(Modifiers::NONE, Key::K) {
+        value.pixel_offset -= 20.0; // TODO: how to get line height?
+    }
+    if input.consume_key(Modifiers::NONE, Key::D)
+        || input.consume_key(Modifiers::CTRL, Key::D)
+        || input.consume_key(Modifiers::NONE, Key::PageDown)
+    {
+        value.pixel_offset += ui_height / 2.0;
+    }
+    if input.consume_key(Modifiers::NONE, Key::U)
+        || input.consume_key(Modifiers::CTRL, Key::U)
+        || input.consume_key(Modifiers::NONE, Key::PageUp)
+    {
+        value.pixel_offset -= ui_height / 2.0;
+    }
+    if input.consume_key(Modifiers::NONE, Key::End) || input.consume_key(Modifiers::SHIFT, Key::G) {
+        value.index = len - 1;
+    }
+    if input.consume_key(Modifiers::NONE, Key::Home) || input.consume_key(Modifiers::NONE, Key::G) {
+        value.index = 0;
+    }
+}
+
 fn big_scroller(
     ui: &mut Ui,
     value: &mut ScrollValue,
-    mut draw: impl FnMut(&mut Ui, usize) -> Option<()>,
+    len: usize,
+    mut draw: impl FnMut(&mut Ui, usize),
 ) {
-    ui.input_mut(|input| {
-        let scroll_mult = -4.0; // inverted?
-        value.pixel_offset += input.smooth_scroll_delta.y * scroll_mult;
-        // if input.smooth_scroll_delta.y != 0.0 {
-        //     println!("scroll input: {} {}", value.index, value.pixel_offset);
-        // }
-        input.smooth_scroll_delta.y = 0.0;
-        if input.consume_key(Modifiers::NONE, Key::J) {
-            value.pixel_offset += 1.0;
-        }
-        if input.consume_key(Modifiers::NONE, Key::K) {
-            value.pixel_offset -= 1.0;
-        }
-    });
-
     ui.scope(|ui| {
         let max_rect = ui.max_rect();
         let absolute_begin = ui.next_widget_position().y;
         ui.add_space(-value.pixel_offset);
-        let mut index = value.index;
-        ui.skip_ahead_auto_ids(index);
-        loop {
+        ui.skip_ahead_auto_ids(value.index);
+        for index in value.index..len {
             let begin = ui.next_widget_position().y;
-            let Some(()) = draw(ui, index) else { break };
+            draw(ui, index);
             let end = ui.next_widget_position().y;
             if end > max_rect.bottom() {
                 break;
             }
-            if end < absolute_begin {
+            if end < absolute_begin && value.index + 1 < len {
                 value.index += 1;
                 let size = end - begin;
                 value.pixel_offset -= size;
                 // println!("next scroll: {} {}", value.index, value.pixel_offset);
             }
-            index += 1;
         }
     });
 
@@ -218,9 +300,7 @@ fn big_scroller(
         ui.scope_builder(UiBuilder::new().sizing_pass().invisible(), |ui| {
             while value.pixel_offset < 0.0 && value.index > 0 {
                 let begin = ui.next_widget_position().y;
-                let Some(()) = draw(ui, value.index - 1) else {
-                    break;
-                };
+                draw(ui, value.index - 1);
                 let end = ui.next_widget_position().y;
                 value.index -= 1;
                 value.pixel_offset += end - begin;
@@ -263,9 +343,7 @@ impl Filter {
             ComboBox::from_id_salt(id_salt)
                 .selected_text(self.kind.name())
                 .show_ui(ui, |ui| {
-                    let kinds = [FilterKind::Target];
-
-                    for kind in kinds {
+                    for kind in FilterKind::ALL {
                         ui.selectable_value(&mut self.kind, kind, kind.name());
                     }
                 });
@@ -279,21 +357,72 @@ impl Filter {
 
 #[derive(Eq, PartialEq, Clone, Copy)]
 enum FilterKind {
+    Timestamp,
+    Level,
+    Fields,
     Target,
+    Filename,
+    // LineNumber,
+    SpanName,
+    Spans,
 }
 
 impl FilterKind {
     fn run(&self, message: &Message, mut visit: impl FnMut(&str) -> bool) -> bool {
         match self {
-            FilterKind::Target => visit(&message.parsed().target),
+            Self::Timestamp => visit(&message.parsed().timestamp),
+            Self::Level => visit(&message.parsed().level),
+            Self::Fields => message.parsed().fields.iter().any(|(k, v)| {
+                visit(k);
+                if let SpanValue::String(v) = v {
+                    visit(v)
+                } else {
+                    false
+                }
+            }),
+            Self::Target => visit(&message.parsed().target),
+            Self::Filename => visit(&message.parsed().filename),
+            Self::SpanName => message.parsed().span.get("name").is_some_and(|n| {
+                if let SpanValue::String(n) = n {
+                    visit(n)
+                } else {
+                    false
+                }
+            }),
+            Self::Spans => message.parsed().spans.iter().any(|n| {
+                n.iter().any(|(k, v)| {
+                    visit(k);
+                    if let SpanValue::String(v) = v {
+                        visit(v)
+                    } else {
+                        false
+                    }
+                })
+            }),
         }
     }
 
     fn name(&self) -> &'static str {
         match self {
-            FilterKind::Target => "target",
+            Self::Timestamp => "timestamp",
+            Self::Level => "level",
+            Self::Fields => "fields",
+            Self::Target => "target",
+            Self::Filename => "filename",
+            Self::SpanName => "span name",
+            Self::Spans => "spans",
         }
     }
+
+    const ALL: [Self; 7] = [
+        Self::Timestamp,
+        Self::Level,
+        Self::Fields,
+        Self::Target,
+        Self::Filename,
+        Self::SpanName,
+        Self::Spans,
+    ];
 }
 
 fn read_lines<E: Error + Send + Sync + 'static>(
@@ -329,16 +458,6 @@ fn text_format_color(color: Color32) -> TextFormat {
     }
 }
 
-const GREY: Color32 = Color32::from_rgb(142, 142, 142);
-const WHITE: Color32 = Color32::from_rgb(216, 216, 216);
-const BLUE: Color32 = Color32::from_rgb(106, 159, 181);
-const PURPLE: Color32 = Color32::from_rgb(170, 117, 159);
-const GREEN: Color32 = Color32::from_rgb(144, 169, 89);
-//const RED: Color32 = Color32::from_rgb(172, 66, 68);
-const CYAN: Color32 = Color32::from_rgb(117, 181, 170);
-//const YELLOW: Color32 = Color32::from_rgb(244, 191, 117);
-const HLSEARCH: Color32 = Color32::from_rgb(0, 92, 128);
-
 struct Message {
     yoke: Yoke<ParsedMessage<'static>, String>,
     parent: Option<usize>,
@@ -363,20 +482,13 @@ impl Message {
     ) -> anyhow::Result<Self> {
         let yoke = Yoke::try_attach_to_cart(line, |l| parse(l))?;
         let parsed: &ParsedMessage = yoke.get();
-        // TODO: use the getter
-        let msg = parsed.fields.get("message").and_then(|v| {
-            if let SpanValue::String(v) = v {
-                Some(v as &str)
-            } else {
-                None
-            }
-        });
+        let msg = parsed.hop_message();
         let parent = parent_stack.last().cloned();
-        if msg == Some("exit") {
+        if msg == Some(HopMessageKind::Exit) {
             parent_stack.pop();
         }
         let self_indent = parent_stack.len();
-        if msg == Some("enter") {
+        if msg == Some(HopMessageKind::Enter) {
             parent_stack.push(index);
         }
 
@@ -394,16 +506,6 @@ impl Message {
 
     fn parsed<'a: 'b, 'b>(&'a self) -> &'a ParsedMessage<'b> {
         self.yoke.get()
-    }
-
-    fn hop_message(&self) -> Option<&str> {
-        self.parsed().fields.get("message").and_then(|v| {
-            if let SpanValue::String(v) = v {
-                Some(v as &str)
-            } else {
-                None
-            }
-        })
     }
 
     fn is_displayed(&self, messages: &[Message], app_state: &AppState) -> bool {
@@ -426,51 +528,59 @@ impl Message {
         }
     }
 
-    fn ui_outer(&mut self, app_state: &mut AppState, ui: &mut Ui) {
+    fn ui_outer(&mut self, parent: Option<&mut Message>, app_state: &mut AppState, ui: &mut Ui) {
         let mut child_rect = ui.available_rect_before_wrap();
-        child_rect.min.x += ui.spacing().indent * self.indent as f32;
+        child_rect.min.x += INDENT * self.indent as f32;
         ui.scope_builder(UiBuilder::new().max_rect(child_rect), |ui| {
-            self.ui(app_state, ui);
+            self.ui(parent, app_state, ui);
         });
     }
 
-    fn ui(&mut self, app_state: &mut AppState, ui: &mut Ui) {
-        let mut job = LayoutJob::default();
+    fn ui(&mut self, parent: Option<&mut Message>, app_state: &mut AppState, ui: &mut Ui) {
+        let mut job = StrBuilder {
+            job: LayoutJob::default(),
+            app_state,
+            found_search: false,
+        };
+        let parsed = self.parsed();
         self.main_text(&mut job);
-        if self.state.display_filename {
+        if self.state.display_filename
+            || !job.found_search && job.app_state.matches_search(&parsed.filename)
+        {
             self.filename(&mut job);
         }
-        if self.state.display_spans {
+        if self.state.display_spans
+            || !job.found_search && job.app_state.vdict_matches_search(&parsed.spans)
+        {
             self.spans(&mut job);
         }
         if self.state.display_raw_json {
             self.raw_json(&mut job);
         }
-        let mut found_search = false;
-        if !app_state.search.is_empty() {
-            self.search(&mut job, &mut found_search, app_state);
-        }
-        let rsp = if !app_state.search.is_empty()
-            && !found_search
-            && self.matches_search(&app_state.search)
+        let rsp = if !job.found_search
+            && !job.app_state.search.is_empty()
+            && self.matches_search(&job.app_state.search)
         {
+            job.found_search = true;
             // fallback to highlight the whole message if we're not displaying the matching text
             Frame::NONE
                 .fill(HLSEARCH)
-                .show(ui, |ui| ui.label(job))
+                .show(ui, |ui| ui.label(job.job))
                 .inner
         } else {
-            ui.label(job)
+            ui.label(job.job)
         };
-        if found_search && ui.clip_rect().intersects(rsp.rect) {
+        if job.found_search && ui.clip_rect().intersects(rsp.rect) {
             app_state.search_onscreen = true;
         }
         rsp.context_menu(|ui| {
-            if let Some("enter") = self.hop_message() {
+            if let Some(HopMessageKind::Enter) = self.parsed().hop_message() {
                 ui.checkbox(&mut self.state.hide_children, "hide children");
+            } else if let Some(parent) = parent {
+                ui.checkbox(&mut parent.state.hide_children, "hide siblings");
             }
             ui.checkbox(&mut self.state.display_filename, "filename");
-            if self.parsed().spans.is_some() {
+            if !self.parsed().spans.is_empty() {
                 ui.checkbox(&mut self.state.display_spans, "spans");
             }
             ui.checkbox(&mut self.state.display_raw_json, "raw json");
@@ -484,46 +594,49 @@ impl Message {
         });
     }
 
-    fn main_text(&self, job: &mut LayoutJob) {
+    fn main_text(&self, job: &mut StrBuilder) {
         let barsed = self.parsed();
-        level(job, 0.0, &barsed.level);
-        job.append(
-            &barsed.target,
-            0.0,
-            TextFormat {
-                color: CYAN,
-                ..text_format()
-            },
-        );
-        if let Some(span) = &barsed.span
-            && let Some(SpanValue::String(name)) = span.get("name")
-        {
-            job.append(
-                "::",
-                0.0,
-                TextFormat {
-                    color: WHITE,
-                    ..text_format()
-                },
-            );
-            job.append(
-                name,
-                0.0,
-                TextFormat {
-                    color: GREEN,
-                    ..text_format()
-                },
-            );
+        if job.app_state.timestamps || job.app_state.matches_search(&barsed.timestamp) {
+            job.append(&barsed.timestamp, 0.0, text_format_color(GREY));
+            job.append(" ", 0.0, text_format_color(GREY));
         }
-        self.dict(job, 8.0, &barsed.fields);
+        if job.app_state.log_levels || job.app_state.matches_search(&barsed.level) {
+            let color = match &*barsed.level {
+                "TRACE" => PURPLE,
+                "DEBUG" => BLUE,
+                "INFO" => GREEN,
+                "WARN" => YELLOW, // TODO: is WARN the right name for this? (i've never seen it)
+                _ => RED,
+            };
+            job.append(&barsed.level, 0.0, text_format_color(color));
+            job.append(" ", 0.0, text_format_color(color));
+        }
+        let target_displayed =
+            job.app_state.targets || job.app_state.matches_search(&barsed.target);
+        if target_displayed {
+            job.append(&barsed.target, 0.0, text_format_color(CYAN));
+        }
+        if let Some(SpanValue::String(name)) = barsed.span.get("name") {
+            if target_displayed {
+                job.append("::", 0.0, text_format_color(WHITE));
+            }
+            job.append(name, 0.0, text_format_color(GREEN));
+        } else if !target_displayed {
+            // TODO: DRY
+            job.append(&barsed.target, 0.0, text_format_color(CYAN));
+        }
+        self.dict(job, INDENT, GREY, &barsed.fields);
+        if barsed.fields.len() == 1 && barsed.hop_message().is_some() {
+            // enter/exit messages get span
+            self.dict(job, INDENT, YELLOW, &barsed.span);
+        }
     }
 
-    fn filename(&self, job: &mut LayoutJob) {
+    fn filename(&self, job: &mut StrBuilder) {
         let parsed = self.parsed();
         job.append("\n", 0.0, text_format());
-        job.append(&parsed.filename, 8.0, text_format_color(GREY));
+        job.append(&parsed.filename, INDENT, text_format_color(GREY));
         job.append(":", 0.0, text_format_color(GREY));
-        // TODO: optimize str allocation here
         job.append(
             &format!("{}", parsed.line_number),
             0.0,
@@ -531,30 +644,37 @@ impl Message {
         );
     }
 
-    fn spans(&self, job: &mut LayoutJob) {
-        if let Some(spans) = &self.parsed().spans {
-            for span in spans {
-                let mut indent = Some(8.0);
-                job.append("\n", 0.0, text_format());
-                if let Some(SpanValue::String(name)) = span.get("name") {
-                    job.append(
-                        name,
-                        indent.take().unwrap_or(0.0),
-                        TextFormat {
-                            color: GREEN,
-                            ..text_format()
-                        },
-                    );
-                }
-                self.dict(job, indent.take().unwrap_or(0.0), span)
-            }
+    fn spans(&self, job: &mut StrBuilder) {
+        // spans are reversed from the normal stack trace
+        for span in self.parsed().spans.iter().rev() {
+            job.append("\n", 0.0, text_format());
+            let name = match span.get("name") {
+                Some(SpanValue::String(name)) => name,
+                _ => "---",
+            };
+            job.append(name, INDENT, text_format_color(GREEN));
+            self.dict(job, INDENT * 2.0, GREY, span)
         }
     }
 
-    fn dict(&self, job: &mut LayoutJob, mut indent: f32, map: &HashMap<Cow<str>, impl CowStrable>) {
+    fn dict(
+        &self,
+        job: &mut StrBuilder,
+        mut indent: f32,
+        key_color: Color32,
+        map: &HashMap<Cow<str>, SpanValue>,
+    ) {
         let total: usize = map
             .iter()
-            .map(|(k, v)| k.len() + v.to_cow_str().len())
+            .map(|(k, v)| {
+                k.len()
+                    + match v {
+                        SpanValue::Bool(false) => 5,
+                        SpanValue::Bool(true) => 4,
+                        SpanValue::Int(v) => format!("{v}").len(),
+                        SpanValue::String(s) => s.len(),
+                    }
+            })
             .sum();
         let sep = if total > 100 {
             "\n"
@@ -564,136 +684,114 @@ impl Message {
         };
         for (key, value) in map {
             job.append(sep, 0.0, text_format_color(WHITE));
-            job.append(key, indent, text_format_color(GREY));
-            job.append(": ", 0.0, text_format_color(GREY));
-            job.append(&value.to_cow_str(), 0.0, text_format_color(WHITE));
+            job.append(key, indent, text_format_color(key_color));
+            job.append(": ", 0.0, text_format_color(key_color));
+            let value = match value {
+                &SpanValue::Bool(v) => {
+                    if v {
+                        "true"
+                    } else {
+                        "false"
+                    }
+                }
+                &SpanValue::Int(v) => &format!("{v}"),
+                SpanValue::String(cow) => &**cow,
+            };
+            job.append(value, 0.0, text_format_color(WHITE));
         }
     }
 
-    fn raw_json(&self, job: &mut LayoutJob) {
+    fn raw_json(&self, job: &mut StrBuilder) {
         job.append("\n", 0.0, text_format());
-        job.append(
-            self.original(),
-            0.0,
-            TextFormat {
-                color: GREY,
-                ..text_format()
-            },
-        );
-    }
-
-    fn search(&self, job: &mut LayoutJob, found_search: &mut bool, app_state: &AppState) {
-        let section_idx = job.sections.iter().enumerate().find_map(|(i, v)| {
-            job.text[v.byte_range.clone()]
-                .find(&app_state.search)
-                .map(|index| (i, v.byte_range.start + index))
-        });
-        if let Some((section_idx, str_index)) = section_idx {
-            let mut section = job.sections.remove(section_idx);
-            let mut prefix = section.clone();
-            let mut suffix = section.clone();
-            let endpoint = str_index + app_state.search.len();
-            let old_start = section.byte_range.start;
-            let old_end = section.byte_range.end;
-            prefix.byte_range = old_start..str_index;
-            section.byte_range = str_index..endpoint;
-            suffix.byte_range = endpoint..old_end;
-            section.format.background = HLSEARCH;
-            job.sections.insert(section_idx, suffix);
-            job.sections.insert(section_idx, section);
-            job.sections.insert(section_idx, prefix);
-            *found_search = true;
-        }
+        job.append(self.original(), 0.0, text_format_color(GREY));
     }
 
     fn matches_search(&self, search: &str) -> bool {
-        fn sp(map: &HashMap<Cow<'_, str>, SpanValue>, search: &str) -> bool {
-            map.iter().any(|(k, v)| {
-                k.contains(search)
-                    || match v {
-                        SpanValue::Bool(_) => false,
-                        SpanValue::Int(_) => false,
-                        SpanValue::String(s) => s.contains(search),
-                    }
-            })
-        }
         let parsed = self.parsed();
         parsed.timestamp.contains(search)
             || parsed.target.contains(search)
             || parsed.filename.contains(search)
-            || sp(&parsed.fields, search)
-            || parsed.span.as_ref().is_some_and(|m| sp(m, search))
-            || parsed
-                .spans
-                .as_ref()
-                .is_some_and(|m| m.iter().any(|m| sp(m, search)))
+            || dict_matches_search(&parsed.fields, search)
+            || dict_matches_search(&parsed.span, search)
+            || parsed.spans.iter().any(|m| dict_matches_search(m, search))
     }
 }
 
-fn level(job: &mut LayoutJob, sp: f32, level: &Level) {
-    let (text, color) = match level {
-        Level::TRACE => ("TRACE ", PURPLE),
-        Level::DEBUG => ("DEBUG ", BLUE),
-        Level::INFO => ("INFO ", GREEN),
-    };
-    let fmt = TextFormat {
-        color,
-        ..text_format()
-    };
-    job.append(text, sp, fmt)
+fn dict_matches_search(map: &HashMap<Cow<str>, SpanValue>, search: &str) -> bool {
+    map.iter().any(|(k, v)| {
+        k.contains(search)
+            || match v {
+                SpanValue::Bool(_) => false,
+                SpanValue::Int(_) => false,
+                SpanValue::String(s) => s.contains(search),
+            }
+    })
+}
+
+#[derive(PartialEq, Eq)]
+enum HopMessageKind {
+    Enter,
+    Exit,
+}
+
+struct StrBuilder<'a> {
+    job: LayoutJob,
+    app_state: &'a mut AppState,
+    found_search: bool,
+}
+
+impl StrBuilder<'_> {
+    fn append(&mut self, text: &str, mut leading_space: f32, format: TextFormat) {
+        let mut last_ind = 0;
+        if !self.app_state.search.is_empty() {
+            for (ind, match_text) in text.match_indices(&self.app_state.search) {
+                let prefix = &text[last_ind..ind];
+                if !prefix.is_empty() {
+                    let fmt = format.clone();
+                    self.job.append(&text[last_ind..ind], leading_space, fmt);
+                    leading_space = 0.0;
+                }
+                let mut fmt = format.clone();
+                fmt.background = HLSEARCH;
+                // section.format.background = HLSEARCH;
+                // section.leading_space = 0.0;
+                // suffix.leading_space = 0.0;
+                self.job
+                    .append(&text[ind..(ind + match_text.len())], leading_space, fmt);
+                leading_space = 0.0;
+                last_ind = ind + match_text.len();
+                self.found_search = true;
+            }
+        }
+        self.job.append(&text[last_ind..], leading_space, format)
+    }
 }
 
 #[derive(Default, yoke::Yokeable)]
 struct ParsedMessage<'a> {
     timestamp: Cow<'a, str>,
-    level: Level,
+    level: Cow<'a, str>,
     fields: HashMap<Cow<'a, str>, SpanValue<'a>>,
     target: Cow<'a, str>,
     filename: Cow<'a, str>,
     line_number: u64,
-    span: Option<HashMap<Cow<'a, str>, SpanValue<'a>>>,
-    spans: Option<Vec<HashMap<Cow<'a, str>, SpanValue<'a>>>>,
+    span: HashMap<Cow<'a, str>, SpanValue<'a>>,
+    spans: Vec<HashMap<Cow<'a, str>, SpanValue<'a>>>,
 }
 
-#[allow(clippy::upper_case_acronyms)]
-#[derive(Default)]
-enum Level {
-    #[default]
-    TRACE,
-    DEBUG,
-    INFO,
-}
-
-impl TryFrom<&str> for Level {
-    type Error = ();
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "TRACE" => Ok(Self::TRACE),
-            "DEBUG" => Ok(Self::DEBUG),
-            "INFO" => Ok(Self::INFO),
-            _ => Err(()),
-        }
-    }
-}
-
-trait CowStrable {
-    fn to_cow_str(&self) -> Cow<'_, str>;
-}
-
-impl CowStrable for Cow<'_, str> {
-    fn to_cow_str(&self) -> Cow<'_, str> {
-        Cow::Borrowed(&**self)
-    }
-}
-
-impl CowStrable for SpanValue<'_> {
-    fn to_cow_str(&self) -> Cow<'_, str> {
-        match self {
-            SpanValue::Bool(v) => Cow::Owned(format!("{v}")),
-            SpanValue::Int(v) => Cow::Owned(format!("{v}")),
-            SpanValue::String(cow) => cow.to_cow_str(),
-        }
+impl ParsedMessage<'_> {
+    fn hop_message(&self) -> Option<HopMessageKind> {
+        self.fields.get("message").and_then(|v| {
+            if let SpanValue::String(v) = v {
+                match &**v {
+                    "enter" => Some(HopMessageKind::Enter),
+                    "exit" => Some(HopMessageKind::Exit),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        })
     }
 }
 
@@ -728,13 +826,13 @@ fn custom_parse2<'a>(iter: &mut Chars<'a>) -> Result<ParsedMessage<'a>, ()> {
         expect(iter, ':')?;
         match &*key {
             "timestamp" => result.timestamp = parse_string(iter)?,
-            "level" => result.level = Level::try_from(&*parse_string(iter)?).map_err(|_| ())?,
+            "level" => result.level = parse_string(iter)?,
             "fields" => parse_dict(iter, &mut result.fields)?,
             "target" => result.target = parse_string(iter)?,
             "filename" => result.filename = parse_string(iter)?,
             "line_number" => result.line_number = parse_number(iter)?,
-            "span" => parse_dict(iter, result.span.get_or_insert_with(Default::default))?,
-            "spans" => parse_dicts(iter, result.spans.get_or_insert_with(Default::default))?,
+            "span" => parse_dict(iter, &mut result.span)?,
+            "spans" => parse_dicts(iter, &mut result.spans)?,
             _ => panic!("unexpected key {key}"),
         }
         match iter.next().ok_or(())? {

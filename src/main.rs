@@ -9,12 +9,11 @@ use std::{
     borrow::Cow,
     collections::HashMap,
     error::Error,
-    fmt::{Debug, Display},
+    fmt::{self, Debug, Display, Formatter},
     fs::File,
     io::{BufRead, BufReader},
     path::Path,
     str::{Chars, FromStr},
-    time::Instant,
 };
 use yoke::Yoke;
 
@@ -29,13 +28,26 @@ const YELLOW: Color32 = Color32::from_rgb(244, 191, 117);
 const HLSEARCH: Color32 = Color32::from_rgb(0, 92, 128);
 const INDENT: f32 = 8.0;
 
-fn main() -> eframe::Result {
-    env_logger::init();
+fn main() -> anyhow::Result<()> {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let targ = std::env::var("RUSTC_LOG_OUTPUT_TARGET");
+    let path = if args.is_empty()
+        && let Ok(f) = &targ
+    {
+        Path::new(f)
+    } else if args.len() != 1 {
+        println!("No file provided. Pass file that was given to RUSTC_LOG_OUTPUT_TARGET");
+        return Ok(());
+    } else {
+        Path::new(&args[0])
+    };
+    let messages = read_lines(path, |s| custom_parse(s))?;
     eframe::run_native(
-        "Viewlog",
+        "Khy's rustc log viewer",
         Default::default(),
-        Box::new(|cc| Ok(Box::new(App::new(cc)?))),
-    )
+        Box::new(|cc| Ok(Box::new(App::new(cc, messages)))),
+    )?;
+    Ok(())
 }
 
 struct App {
@@ -83,18 +95,12 @@ impl AppState {
 }
 
 impl App {
-    fn new(_cc: &CreationContext) -> anyhow::Result<Self> {
-        let start = Instant::now();
-        let messages = read_lines(Path::new("/home/khyperia/rustc-log.txt"), |s| {
-            custom_parse(s)
-        })?;
-        let end = Instant::now();
-        println!("{:?}", end - start);
-        Ok(App {
+    fn new(_cc: &CreationContext, messages: Vec<Message>) -> Self {
+        App {
             messages,
             scroll_value: Default::default(),
             state: AppState::new(),
-        })
+        }
     }
 
     // silly nit: index is *inclusive* here
@@ -196,7 +202,7 @@ impl eframe::App for App {
             if ui.button("add filter").clicked() {
                 self.state.filters.push(Filter::new())
             }
-            ui.add_space(5.0);
+            ui.add_space(2.0);
         });
         self.state.search_onscreen = false;
         let panel = CentralPanel::default().frame(Frame::new().fill(Color32::from_rgb(38, 50, 56)));
@@ -596,6 +602,20 @@ impl Message {
 
     fn main_text(&self, job: &mut StrBuilder) {
         let barsed = self.parsed();
+        if let Some(hop) = barsed.hop_message() {
+            let text = match hop {
+                HopMessageKind::Enter => {
+                    if self.state.hide_children {
+                        "\u{2193}"
+                    } else {
+                        "\u{2192}"
+                    }
+                }
+                HopMessageKind::Exit => "\u{2190}",
+            };
+            job.append(text, 0.0, text_format_color(YELLOW));
+        }
+
         if job.app_state.timestamps || job.app_state.matches_search(&barsed.timestamp) {
             job.append(&barsed.timestamp, 0.0, text_format_color(GREY));
             job.append(" ", 0.0, text_format_color(GREY));
@@ -625,10 +645,24 @@ impl Message {
             // TODO: DRY
             job.append(&barsed.target, 0.0, text_format_color(CYAN));
         }
-        self.dict(job, INDENT, GREY, &barsed.fields);
-        if barsed.fields.len() == 1 && barsed.hop_message().is_some() {
+        if barsed.fields.len() == 1
+            && let Some(hop) = barsed.hop_message()
+        {
+            let text = match hop {
+                HopMessageKind::Enter => {
+                    if self.state.hide_children {
+                        " hidden span:"
+                    } else {
+                        " enter span:"
+                    }
+                }
+                HopMessageKind::Exit => " exit span:",
+            };
+            job.append(text, 0.0, text_format_color(YELLOW));
             // enter/exit messages get span
-            self.dict(job, INDENT, YELLOW, &barsed.span);
+            self.dict(job, INDENT * 2.0, YELLOW, &barsed.span);
+        } else {
+            self.dict(job, INDENT, GREY, &barsed.fields);
         }
     }
 
@@ -664,6 +698,15 @@ impl Message {
         key_color: Color32,
         map: &HashMap<Cow<str>, SpanValue>,
     ) {
+        // common case
+        if map.len() == 1
+            && let Some(SpanValue::String(message)) = map.get("message")
+        {
+            job.append(" ", 0.0, text_format_color(WHITE));
+            job.append(message, 0.0, text_format_color(WHITE));
+            return;
+        }
+
         let total: usize = map
             .iter()
             .map(|(k, v)| {
@@ -797,26 +840,63 @@ impl ParsedMessage<'_> {
 
 enum SpanValue<'a> {
     Bool(bool),
-    Int(i64),
+    Int(u64),
     String(Cow<'a, str>),
 }
 
 #[derive(Debug)]
-struct ParseError;
+struct ParseError {
+    line: String,
+    message: String,
+}
 
 impl Display for ParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("parse error")
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_fmt(format_args!(
+            "parse error: {} -- on line {}",
+            self.message, self.line
+        ))
     }
 }
 
 impl Error for ParseError {}
 
 fn custom_parse<'a>(s: &'a str) -> Result<ParsedMessage<'a>, ParseError> {
-    custom_parse2(&mut s.chars()).map_err(|()| ParseError)
+    custom_parse2(&mut s.chars()).map_err(|inner| ParseError {
+        line: s.to_string(),
+        message: format!("{}", inner),
+    })
 }
 
-fn custom_parse2<'a>(iter: &mut Chars<'a>) -> Result<ParsedMessage<'a>, ()> {
+enum InnerParseError<'a> {
+    UnknownField(Cow<'a, str>),
+    UnexpectedEof(&'static str),
+    UnexpectedChar(&'static [char], char),
+    UnexpectedCharSingle(char, char),
+    InvalidNumber(&'a str),
+}
+
+impl Display for InnerParseError<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownField(field) => f.write_fmt(format_args!("unknown field {}", field)),
+            Self::UnexpectedEof(kind) => {
+                f.write_fmt(format_args!("unexpected eof parsing {}", kind))
+            }
+            Self::UnexpectedChar(expected, got) => f.write_fmt(format_args!(
+                "unexpected character '{}' (expected one of {:?})",
+                got, expected
+            )),
+            Self::UnexpectedCharSingle(expected, got) => f.write_fmt(format_args!(
+                "unexpected character '{}' (expected '{}')",
+                got, expected
+            )),
+            Self::InvalidNumber(number) => f.write_fmt(format_args!("invalid number {}", number)),
+        }
+    }
+}
+
+fn custom_parse2<'a>(iter: &mut Chars<'a>) -> Result<ParsedMessage<'a>, InnerParseError<'a>> {
     let mut result = ParsedMessage::default();
 
     expect(iter, '{')?;
@@ -833,12 +913,15 @@ fn custom_parse2<'a>(iter: &mut Chars<'a>) -> Result<ParsedMessage<'a>, ()> {
             "line_number" => result.line_number = parse_number(iter)?,
             "span" => parse_dict(iter, &mut result.span)?,
             "spans" => parse_dicts(iter, &mut result.spans)?,
-            _ => panic!("unexpected key {key}"),
+            _ => break Err(InnerParseError::UnknownField(key)),
         }
-        match iter.next().ok_or(())? {
+        match iter
+            .next()
+            .ok_or(InnerParseError::UnexpectedEof("message"))?
+        {
             '}' => break Ok(result),
             ',' => continue,
-            ch => panic!("unexpected ch {ch}"),
+            ch => break Err(InnerParseError::UnexpectedChar(&['}', ','], ch)),
         }
     }
 }
@@ -846,7 +929,7 @@ fn custom_parse2<'a>(iter: &mut Chars<'a>) -> Result<ParsedMessage<'a>, ()> {
 fn parse_dicts<'a>(
     iter: &mut Chars<'a>,
     result: &mut Vec<HashMap<Cow<'a, str>, SpanValue<'a>>>,
-) -> Result<(), ()> {
+) -> Result<(), InnerParseError<'a>> {
     expect(iter, '[')?;
     let mut iter_clone = iter.clone();
     if iter_clone.next() == Some(']') {
@@ -857,10 +940,13 @@ fn parse_dicts<'a>(
         let mut single = Default::default();
         parse_dict(iter, &mut single)?;
         result.push(single);
-        match iter.next().ok_or(())? {
+        match iter
+            .next()
+            .ok_or(InnerParseError::UnexpectedEof("dict array"))?
+        {
             ']' => break Ok(()),
             ',' => continue,
-            _ => break Err(()),
+            ch => break Err(InnerParseError::UnexpectedChar(&[']', ','], ch)),
         }
     }
 }
@@ -868,13 +954,16 @@ fn parse_dicts<'a>(
 fn parse_dict<'a>(
     iter: &mut Chars<'a>,
     result: &mut HashMap<Cow<'a, str>, SpanValue<'a>>,
-) -> Result<(), ()> {
+) -> Result<(), InnerParseError<'a>> {
     expect(iter, '{')?;
     loop {
         let key = parse_string(iter)?;
         expect(iter, ':')?;
         let start = iter.as_str();
-        let value = match iter.next().ok_or(())? {
+        let value = match iter
+            .next()
+            .ok_or(InnerParseError::UnexpectedEof("dict key"))?
+        {
             '"' => SpanValue::String(parse_string_after_quote(iter)?),
             't' => {
                 expect(iter, 'r')?;
@@ -890,26 +979,26 @@ fn parse_dict<'a>(
                 SpanValue::Bool(false)
             }
             ch if ch.is_ascii_digit() => SpanValue::Int(parse_number_after_digit(start, iter)?),
-            ch => panic!("unexpected ch {ch}"),
+            ch => break Err(InnerParseError::UnexpectedChar(&['"', 't', 'f', '0'], ch)),
         };
         result.insert(key, value);
-        match iter.next().ok_or(())? {
+        match iter.next().ok_or(InnerParseError::UnexpectedEof("dict"))? {
             '}' => break Ok(()),
             ',' => continue,
-            ch => panic!("unexpected ch {ch}"),
+            ch => break Err(InnerParseError::UnexpectedChar(&['}', ','], ch)),
         }
     }
 }
 
-fn parse_string<'a>(iter: &mut Chars<'a>) -> Result<Cow<'a, str>, ()> {
+fn parse_string<'a>(iter: &mut Chars<'a>) -> Result<Cow<'a, str>, InnerParseError<'a>> {
     expect(iter, '"')?;
     parse_string_after_quote(iter)
 }
 
-fn parse_string_after_quote<'a>(iter: &mut Chars<'a>) -> Result<Cow<'a, str>, ()> {
+fn parse_string_after_quote<'a>(iter: &mut Chars<'a>) -> Result<Cow<'a, str>, InnerParseError<'a>> {
     let str_begin = iter.as_str();
     let Some(quot) = str_begin.find('"') else {
-        return Err(());
+        return Err(InnerParseError::UnexpectedEof("string"));
     };
     let str_to_quot = &str_begin[..quot];
     if let Some(_backslash) = str_to_quot.find('\\') {
@@ -919,33 +1008,40 @@ fn parse_string_after_quote<'a>(iter: &mut Chars<'a>) -> Result<Cow<'a, str>, ()
     }
     // approx. 1.43% of strings had an escape in the dataset I used to test
     loop {
-        let ch = iter.next().ok_or(())?;
+        let ch = iter
+            .next()
+            .ok_or(InnerParseError::UnexpectedEof("escaped string"))?;
         if ch == '"' {
             let str_end = iter.as_str();
             let len = str_begin.len() - (str_end.len() + 1);
             break Ok(Cow::Borrowed(&str_begin[..len]));
         } else if ch == '\\' {
             let Some(_escaped_ch) = iter.next() else {
-                panic!("unexpected eof: {ch}");
+                break Err(InnerParseError::UnexpectedEof("escape sequence"));
             };
         }
     }
 }
 
-fn parse_number<'a, T: FromStr>(iter: &mut Chars<'a>) -> Result<T, ()>
+fn parse_number<'a, T: FromStr>(iter: &mut Chars<'a>) -> Result<T, InnerParseError<'a>>
 where
     <T as FromStr>::Err: Debug,
 {
     let start = iter.as_str();
-    let ch = iter.next().ok_or(())?;
+    let ch = iter
+        .next()
+        .ok_or(InnerParseError::UnexpectedEof("number"))?;
     if ch.is_ascii_digit() {
         parse_number_after_digit(start, iter)
     } else {
-        Err(())
+        Err(InnerParseError::UnexpectedChar(&['0'], ch))
     }
 }
 
-fn parse_number_after_digit<'a, T: FromStr>(start: &'a str, iter: &mut Chars<'a>) -> Result<T, ()>
+fn parse_number_after_digit<'a, T: FromStr>(
+    start: &'a str,
+    iter: &mut Chars<'a>,
+) -> Result<T, InnerParseError<'a>>
 where
     <T as FromStr>::Err: Debug,
 {
@@ -960,13 +1056,17 @@ where
         }
         *iter = cloned;
     };
-    T::from_str(slice).map_err(|_| ())
+    T::from_str(slice).map_err(|_| InnerParseError::InvalidNumber(slice))
 }
 
-fn expect<'a>(iter: &mut Chars<'a>, ch: char) -> Result<(), ()> {
+fn expect<'a>(iter: &mut Chars<'a>, ch: char) -> Result<(), InnerParseError<'a>> {
     if let Some(got) = iter.next() {
-        if got == ch { Ok(()) } else { Err(()) }
+        if got == ch {
+            Ok(())
+        } else {
+            Err(InnerParseError::UnexpectedCharSingle(ch, got))
+        }
     } else {
-        Err(())
+        Err(InnerParseError::UnexpectedEof("number"))
     }
 }

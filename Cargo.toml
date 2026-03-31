@@ -1,11 +1,9 @@
 [package]
-name = "viewlog"
+name = "khys-rustc-log-viewer"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 anyhow = "*"
 eframe = "*"
-env_logger = "*"
-libc = "*"
-yoke = { version = "*", features = ["derive"] }
+yoke = "*"

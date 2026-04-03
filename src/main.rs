@@ -13,7 +13,7 @@ use std::{
     fs::File,
     io::{BufRead, BufReader},
     path::PathBuf,
-    str::{Chars, FromStr},
+    str::Chars,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -494,7 +494,7 @@ enum FilterKind {
     Fields,
     Target,
     Filename,
-    // LineNumber,
+    LineNumber,
     SpanName,
     Spans,
 }
@@ -514,6 +514,7 @@ impl FilterKind {
             }),
             Self::Target => visit(&message.parsed().target),
             Self::Filename => visit(&message.parsed().filename),
+            Self::LineNumber => visit(&message.parsed().line_number),
             Self::SpanName => message.parsed().span.get("name").is_some_and(|n| {
                 if let JsonValue::String(n) = n {
                     visit(n)
@@ -541,17 +542,19 @@ impl FilterKind {
             Self::Fields => "fields",
             Self::Target => "target",
             Self::Filename => "filename",
+            Self::LineNumber => "line number",
             Self::SpanName => "span name",
             Self::Spans => "spans",
         }
     }
 
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Timestamp,
         Self::Level,
         Self::Fields,
         Self::Target,
         Self::Filename,
+        Self::LineNumber,
         Self::SpanName,
         Self::Spans,
     ];
@@ -689,7 +692,9 @@ impl<'b> Message<'b> {
         let parsed = self.parsed();
         self.main_text(&mut job);
         if self.state.display_filename
-            || !job.found_search && job.app_state.matches_search(&parsed.filename)
+            || !job.found_search
+                && (job.app_state.matches_search(&parsed.filename)
+                    || job.app_state.matches_search(&parsed.line_number))
         {
             self.filename(&mut job);
         }
@@ -808,11 +813,7 @@ impl<'b> Message<'b> {
         job.append("\n", 0.0, text_format());
         job.append(&parsed.filename, INDENT, text_format_color(FILENAME));
         job.append(":", 0.0, text_format_color(FILENAME));
-        job.append(
-            &format!("{}", parsed.line_number),
-            0.0,
-            text_format_color(FILENAME),
-        );
+        job.append(parsed.line_number, 0.0, text_format_color(FILENAME));
     }
 
     fn spans(&self, job: &mut StrBuilder) {
@@ -849,9 +850,6 @@ impl<'b> Message<'b> {
             .map(|(k, v)| {
                 k.len()
                     + match v {
-                        JsonValue::Bool(false) => 5,
-                        JsonValue::Bool(true) => 4,
-                        JsonValue::Int(v) => format!("{v}").len(),
                         JsonValue::String(s) => s.len(),
                         JsonValue::Logparsed(s) => s.backing_cart().len(),
                     }
@@ -876,6 +874,7 @@ impl<'b> Message<'b> {
         parsed.timestamp.contains(search)
             || parsed.target.contains(search)
             || parsed.filename.contains(search)
+            || parsed.line_number.contains(search)
             || dict_matches_search(&parsed.fields, search)
             || dict_matches_search(&parsed.span, search)
             || parsed.spans.iter().any(|m| dict_matches_search(m, search))
@@ -886,8 +885,6 @@ fn dict_matches_search(map: &HashMap<&str, JsonValue>, search: &str) -> bool {
     map.iter().any(|(k, v)| {
         k.contains(search)
             || match v {
-                JsonValue::Bool(_) => false,
-                JsonValue::Int(_) => false,
                 JsonValue::String(s) => s.contains(search),
                 JsonValue::Logparsed(logparsed) => logparsed.backing_cart().contains(search),
             }
@@ -940,7 +937,7 @@ struct ParsedMessage<'b> {
     fields: HashMap<&'b str, JsonValue<'b>>,
     target: &'b str,
     filename: &'b str,
-    line_number: u64,
+    line_number: &'b str,
     span: HashMap<&'b str, JsonValue<'b>>,
     spans: Vec<HashMap<&'b str, JsonValue<'b>>>,
 }
@@ -951,7 +948,6 @@ impl<'b> ParsedMessage<'b> {
             let v: &str = match v {
                 JsonValue::String(v) => v,
                 JsonValue::Logparsed(v) => v.backing_cart(),
-                _ => return None,
             };
             match v {
                 "enter" => Some(HopMessageKind::Enter),
@@ -963,14 +959,12 @@ impl<'b> ParsedMessage<'b> {
 }
 
 enum JsonValue<'b> {
-    Bool(bool),
-    Int(u64),
     String(&'b str),
-    // wrap in box to ensure enum stays 24 bytes
+    // wrap in box to ensure enum stays 16 bytes
     Logparsed(Box<Yoke<LogparsyYoke<'static>, &'b str>>),
 }
 
-const _: [(); 24] = [(); std::mem::size_of::<JsonValue>()];
+const _: [(); std::mem::size_of::<usize>() * 2] = [(); std::mem::size_of::<JsonValue>()];
 
 #[derive(yoke::Yokeable)]
 struct LogparsyYoke<'a>(Result<Vec<logparse::Span<'a>>, String>);
@@ -996,14 +990,6 @@ impl<'b> JsonValue<'b> {
 
     fn format(&self, job: &mut StrBuilder) {
         let value = match self {
-            &JsonValue::Bool(v) => {
-                if v {
-                    "true"
-                } else {
-                    "false"
-                }
-            }
-            &JsonValue::Int(v) => &format!("{v}"),
             JsonValue::String(cow) => &**cow,
             JsonValue::Logparsed(logparsed) => {
                 let parsed = logparsed.get();
@@ -1055,15 +1041,14 @@ fn custom_parse<'a, 'b>(bump: &'b Bump, s: &'a str) -> Result<ParsedMessage<'b>,
     })
 }
 
-enum InnerParseError<'a, 'b> {
+enum InnerParseError<'b> {
     UnknownField(&'b str),
     UnexpectedEof(&'static str),
     UnexpectedChar(&'static [char], char),
     UnexpectedCharSingle(char, char),
-    InvalidNumber(&'a str),
 }
 
-impl Display for InnerParseError<'_, '_> {
+impl Display for InnerParseError<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownField(field) => f.write_fmt(format_args!("unknown field {}", field)),
@@ -1078,7 +1063,6 @@ impl Display for InnerParseError<'_, '_> {
                 "unexpected character '{}' (expected '{}')",
                 got, expected
             )),
-            Self::InvalidNumber(number) => f.write_fmt(format_args!("invalid number {}", number)),
         }
     }
 }
@@ -1086,7 +1070,7 @@ impl Display for InnerParseError<'_, '_> {
 fn custom_parse2<'a, 'b>(
     bump: &'b Bump,
     iter: &mut Chars<'a>,
-) -> Result<ParsedMessage<'b>, InnerParseError<'a, 'b>> {
+) -> Result<ParsedMessage<'b>, InnerParseError<'b>> {
     let mut result = ParsedMessage::default();
 
     expect(iter, '{')?;
@@ -1100,7 +1084,7 @@ fn custom_parse2<'a, 'b>(
             "fields" => parse_dict(bump, iter, &mut result.fields)?,
             "target" => result.target = parse_string(bump, iter)?,
             "filename" => result.filename = parse_string(bump, iter)?,
-            "line_number" => result.line_number = parse_number(iter)?,
+            "line_number" => result.line_number = parse_number(bump, iter)?,
             "span" => parse_dict(bump, iter, &mut result.span)?,
             "spans" => parse_dicts(bump, iter, &mut result.spans)?,
             _ => break Err(InnerParseError::UnknownField(key)),
@@ -1120,7 +1104,7 @@ fn parse_dicts<'a, 'b>(
     bump: &'b Bump,
     iter: &mut Chars<'a>,
     result: &mut Vec<HashMap<&'b str, JsonValue<'b>>>,
-) -> Result<(), InnerParseError<'a, 'b>> {
+) -> Result<(), InnerParseError<'b>> {
     expect(iter, '[')?;
     let mut iter_clone = iter.clone();
     if iter_clone.next() == Some(']') {
@@ -1146,7 +1130,7 @@ fn parse_dict<'a, 'b>(
     bump: &'b Bump,
     iter: &mut Chars<'a>,
     result: &mut HashMap<&'b str, JsonValue<'b>>,
-) -> Result<(), InnerParseError<'a, 'b>> {
+) -> Result<(), InnerParseError<'b>> {
     expect(iter, '{')?;
     loop {
         let key = parse_string(bump, iter)?;
@@ -1156,24 +1140,24 @@ fn parse_dict<'a, 'b>(
             .next()
             .ok_or(InnerParseError::UnexpectedEof("dict key"))?
         {
-            '"' => JsonValue::String(parse_string_after_quote(bump, iter)?),
+            '"' => parse_string_after_quote(bump, iter)?,
             't' => {
                 expect(iter, 'r')?;
                 expect(iter, 'u')?;
                 expect(iter, 'e')?;
-                JsonValue::Bool(true)
+                "true"
             }
             'f' => {
                 expect(iter, 'a')?;
                 expect(iter, 'l')?;
                 expect(iter, 's')?;
                 expect(iter, 'e')?;
-                JsonValue::Bool(false)
+                "false"
             }
-            ch if ch.is_ascii_digit() => JsonValue::Int(parse_number_after_digit(start, iter)?),
+            ch if ch.is_ascii_digit() => parse_number_after_digit(bump, start, iter)?,
             ch => break Err(InnerParseError::UnexpectedChar(&['"', 't', 'f', '0'], ch)),
         };
-        result.insert(key, value);
+        result.insert(key, JsonValue::String(value));
         match iter.next().ok_or(InnerParseError::UnexpectedEof("dict"))? {
             '}' => break Ok(()),
             ',' => continue,
@@ -1185,7 +1169,7 @@ fn parse_dict<'a, 'b>(
 fn parse_string<'a, 'b>(
     bump: &'b Bump,
     iter: &mut Chars<'a>,
-) -> Result<&'b str, InnerParseError<'a, 'b>> {
+) -> Result<&'b str, InnerParseError<'b>> {
     expect(iter, '"')?;
     parse_string_after_quote(bump, iter)
 }
@@ -1193,7 +1177,7 @@ fn parse_string<'a, 'b>(
 fn parse_string_after_quote<'a, 'b>(
     bump: &'b Bump,
     iter: &mut Chars<'a>,
-) -> Result<&'b str, InnerParseError<'a, 'b>> {
+) -> Result<&'b str, InnerParseError<'b>> {
     let str_begin = iter.as_str();
     let mut backslash_count = 0;
     let mut cur_index = 0;
@@ -1245,28 +1229,26 @@ fn parse_string_after_quote<'a, 'b>(
     Ok(str::from_utf8(result).unwrap())
 }
 
-fn parse_number<'a, T: FromStr>(iter: &mut Chars<'a>) -> Result<T, InnerParseError<'a, 'static>>
-where
-    <T as FromStr>::Err: Debug,
-{
+fn parse_number<'a, 'b>(
+    bump: &'b Bump,
+    iter: &mut Chars<'a>,
+) -> Result<&'b str, InnerParseError<'static>> {
     let start = iter.as_str();
     let ch = iter
         .next()
         .ok_or(InnerParseError::UnexpectedEof("number"))?;
     if ch.is_ascii_digit() {
-        parse_number_after_digit(start, iter)
+        parse_number_after_digit(bump, start, iter)
     } else {
         Err(InnerParseError::UnexpectedChar(&['0'], ch))
     }
 }
 
-fn parse_number_after_digit<'a, T: FromStr>(
+fn parse_number_after_digit<'a, 'b>(
+    bump: &'b Bump,
     start: &'a str,
     iter: &mut Chars<'a>,
-) -> Result<T, InnerParseError<'a, 'static>>
-where
-    <T as FromStr>::Err: Debug,
-{
+) -> Result<&'b str, InnerParseError<'static>> {
     let slice = loop {
         let mut cloned = iter.clone();
         let Some(ch) = cloned.next() else {
@@ -1278,10 +1260,11 @@ where
         }
         *iter = cloned;
     };
-    T::from_str(slice).map_err(|_| InnerParseError::InvalidNumber(slice))
+    Ok(bump.alloc_str(slice))
+    //T::from_str(slice).map_err(|_| InnerParseError::InvalidNumber(slice))
 }
 
-fn expect<'a>(iter: &mut Chars<'a>, ch: char) -> Result<(), InnerParseError<'a, 'static>> {
+fn expect<'a>(iter: &mut Chars<'a>, ch: char) -> Result<(), InnerParseError<'static>> {
     if let Some(got) = iter.next() {
         if got == ch {
             Ok(())

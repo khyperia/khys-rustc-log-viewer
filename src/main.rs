@@ -17,15 +17,63 @@ use std::{
 };
 use yoke::Yoke;
 
-const GREY: Color32 = Color32::from_rgb(142, 142, 142);
-const WHITE: Color32 = Color32::from_rgb(216, 216, 216);
-const BLUE: Color32 = Color32::from_rgb(106, 159, 181);
-const PURPLE: Color32 = Color32::from_rgb(170, 117, 159);
-const GREEN: Color32 = Color32::from_rgb(144, 169, 89);
-const RED: Color32 = Color32::from_rgb(172, 66, 68);
-const CYAN: Color32 = Color32::from_rgb(117, 181, 170);
-const YELLOW: Color32 = Color32::from_rgb(244, 191, 117);
-const HLSEARCH: Color32 = Color32::from_rgb(0, 92, 128);
+#[allow(dead_code)]
+mod alacritty {
+    use eframe::egui::Color32;
+
+    // colors copied from (and inspired by/derived from) alacritty's default scheme:
+    // https://github.com/alacritty/alacritty/blob/f99dc71708d31d5c32d4b3fa611f9a87bf22657e/alacritty/src/config/color.rs#L204-L211
+    pub const BLACK: Color32 = Color32::from_rgb(0x18, 0x18, 0x18);
+    pub const RED: Color32 = Color32::from_rgb(0xac, 0x42, 0x42);
+    pub const GREEN: Color32 = Color32::from_rgb(0x90, 0xa9, 0x59);
+    pub const YELLOW: Color32 = Color32::from_rgb(0xf4, 0xbf, 0x75);
+    pub const BLUE: Color32 = Color32::from_rgb(0x6a, 0x9f, 0xb5);
+    pub const MAGENTA: Color32 = Color32::from_rgb(0xaa, 0x75, 0x9f);
+    pub const CYAN: Color32 = Color32::from_rgb(0x75, 0xb5, 0xaa);
+    pub const WHITE: Color32 = Color32::from_rgb(0xd8, 0xd8, 0xd8);
+
+    pub const BRIGHT_BLACK: Color32 = Color32::from_rgb(0x6b, 0x6b, 0x6b);
+    pub const BRIGHT_RED: Color32 = Color32::from_rgb(0xc5, 0x55, 0x55);
+    pub const BRIGHT_GREEN: Color32 = Color32::from_rgb(0xaa, 0xc4, 0x74);
+    pub const BRIGHT_YELLOW: Color32 = Color32::from_rgb(0xfe, 0xca, 0x88);
+    pub const BRIGHT_BLUE: Color32 = Color32::from_rgb(0x82, 0xb8, 0xc8);
+    pub const BRIGHT_MAGENTA: Color32 = Color32::from_rgb(0xc2, 0x8c, 0xb8);
+    pub const BRIGHT_CYAN: Color32 = Color32::from_rgb(0x93, 0xd3, 0xc3);
+    pub const BRIGHT_WHITE: Color32 = Color32::from_rgb(0xf8, 0xf8, 0xf8);
+
+    pub const DIM_BLACK: Color32 = Color32::from_rgb(0x0f, 0x0f, 0x0f);
+    pub const DIM_RED: Color32 = Color32::from_rgb(0x71, 0x2b, 0x2b);
+    pub const DIM_GREEN: Color32 = Color32::from_rgb(0x5f, 0x6f, 0x3a);
+    pub const DIM_YELLOW: Color32 = Color32::from_rgb(0xa1, 0x7e, 0x4d);
+    pub const DIM_BLUE: Color32 = Color32::from_rgb(0x45, 0x68, 0x77);
+    pub const DIM_MAGENTA: Color32 = Color32::from_rgb(0x70, 0x4d, 0x68);
+    pub const DIM_CYAN: Color32 = Color32::from_rgb(0x4d, 0x77, 0x70);
+    pub const DIM_WHITE: Color32 = Color32::from_rgb(0x8e, 0x8e, 0x8e);
+}
+
+const HLSEARCH: Color32 = Color32::from_rgb(0, 0x5c, 0x80);
+
+const SPAN: Color32 = alacritty::YELLOW;
+const SPAN_KEYS: Color32 = alacritty::DIM_WHITE;
+const FIELD_KEYS: Color32 = alacritty::DIM_WHITE;
+const FIELD_VALUES: Color32 = alacritty::WHITE;
+const TARGET: Color32 = alacritty::CYAN;
+const COLON_COLON: Color32 = alacritty::WHITE;
+const SPAN_NAME: Color32 = alacritty::GREEN;
+const TIMESTAMP: Color32 = alacritty::DIM_WHITE;
+const FILENAME: Color32 = alacritty::DIM_WHITE;
+const RAW_JSON: Color32 = alacritty::DIM_WHITE;
+
+fn log_level_color(level: &str) -> Color32 {
+    match level {
+        "TRACE" => alacritty::MAGENTA,
+        "DEBUG" => alacritty::BLUE,
+        "INFO" => alacritty::GREEN,
+        "WARN" => alacritty::YELLOW, // TODO: is WARN the right name for this? (i've never seen it)
+        _ => alacritty::RED,
+    }
+}
+
 const INDENT: f32 = 8.0;
 
 fn main() -> anyhow::Result<()> {
@@ -36,7 +84,7 @@ fn main() -> anyhow::Result<()> {
     {
         Path::new(f)
     } else if args.len() != 1 {
-        println!("No file provided. Pass file that was given to RUSTC_LOG_OUTPUT_TARGET");
+        println!("No file provided. Pass the file that was given to RUSTC_LOG_OUTPUT_TARGET");
         return Ok(());
     } else {
         Path::new(&args[0])
@@ -613,37 +661,31 @@ impl Message {
                 }
                 HopMessageKind::Exit => "\u{2190}",
             };
-            job.append(text, 0.0, text_format_color(YELLOW));
+            job.append(text, 0.0, text_format_color(SPAN));
         }
 
         if job.app_state.timestamps || job.app_state.matches_search(&barsed.timestamp) {
-            job.append(&barsed.timestamp, 0.0, text_format_color(GREY));
-            job.append(" ", 0.0, text_format_color(GREY));
+            job.append(&barsed.timestamp, 0.0, text_format_color(TIMESTAMP));
+            job.append(" ", 0.0, text_format());
         }
         if job.app_state.log_levels || job.app_state.matches_search(&barsed.level) {
-            let color = match &*barsed.level {
-                "TRACE" => PURPLE,
-                "DEBUG" => BLUE,
-                "INFO" => GREEN,
-                "WARN" => YELLOW, // TODO: is WARN the right name for this? (i've never seen it)
-                _ => RED,
-            };
+            let color = log_level_color(&barsed.level);
             job.append(&barsed.level, 0.0, text_format_color(color));
-            job.append(" ", 0.0, text_format_color(color));
+            job.append(" ", 0.0, text_format());
         }
         let target_displayed =
             job.app_state.targets || job.app_state.matches_search(&barsed.target);
         if target_displayed {
-            job.append(&barsed.target, 0.0, text_format_color(CYAN));
+            job.append(&barsed.target, 0.0, text_format_color(TARGET));
         }
         if let Some(SpanValue::String(name)) = barsed.span.get("name") {
             if target_displayed {
-                job.append("::", 0.0, text_format_color(WHITE));
+                job.append("::", 0.0, text_format_color(COLON_COLON));
             }
-            job.append(name, 0.0, text_format_color(GREEN));
+            job.append(name, 0.0, text_format_color(SPAN_NAME));
         } else if !target_displayed {
             // TODO: DRY
-            job.append(&barsed.target, 0.0, text_format_color(CYAN));
+            job.append(&barsed.target, 0.0, text_format_color(TARGET));
         }
         if barsed.fields.len() == 1
             && let Some(hop) = barsed.hop_message()
@@ -658,23 +700,23 @@ impl Message {
                 }
                 HopMessageKind::Exit => " exit span:",
             };
-            job.append(text, 0.0, text_format_color(YELLOW));
+            job.append(text, 0.0, text_format_color(SPAN));
             // enter/exit messages get span
-            self.dict(job, INDENT * 2.0, YELLOW, &barsed.span);
+            self.dict(job, INDENT * 2.0, SPAN, &barsed.span);
         } else {
-            self.dict(job, INDENT, GREY, &barsed.fields);
+            self.dict(job, INDENT, FIELD_KEYS, &barsed.fields);
         }
     }
 
     fn filename(&self, job: &mut StrBuilder) {
         let parsed = self.parsed();
         job.append("\n", 0.0, text_format());
-        job.append(&parsed.filename, INDENT, text_format_color(GREY));
-        job.append(":", 0.0, text_format_color(GREY));
+        job.append(&parsed.filename, INDENT, text_format_color(FILENAME));
+        job.append(":", 0.0, text_format_color(FILENAME));
         job.append(
             &format!("{}", parsed.line_number),
             0.0,
-            text_format_color(GREY),
+            text_format_color(FILENAME),
         );
     }
 
@@ -686,8 +728,8 @@ impl Message {
                 Some(SpanValue::String(name)) => name,
                 _ => "---",
             };
-            job.append(name, INDENT, text_format_color(GREEN));
-            self.dict(job, INDENT * 2.0, GREY, span)
+            job.append(name, INDENT, text_format_color(SPAN_NAME));
+            self.dict(job, INDENT * 2.0, SPAN_KEYS, span)
         }
     }
 
@@ -702,8 +744,8 @@ impl Message {
         if map.len() == 1
             && let Some(SpanValue::String(message)) = map.get("message")
         {
-            job.append(" ", 0.0, text_format_color(WHITE));
-            job.append(message, 0.0, text_format_color(WHITE));
+            job.append(" ", 0.0, text_format());
+            job.append(message, 0.0, text_format_color(FIELD_VALUES));
             return;
         }
 
@@ -726,7 +768,7 @@ impl Message {
             " "
         };
         for (key, value) in map {
-            job.append(sep, 0.0, text_format_color(WHITE));
+            job.append(sep, 0.0, text_format());
             job.append(key, indent, text_format_color(key_color));
             job.append(": ", 0.0, text_format_color(key_color));
             let value = match value {
@@ -740,13 +782,13 @@ impl Message {
                 &SpanValue::Int(v) => &format!("{v}"),
                 SpanValue::String(cow) => &**cow,
             };
-            job.append(value, 0.0, text_format_color(WHITE));
+            job.append(value, 0.0, text_format_color(FIELD_VALUES));
         }
     }
 
     fn raw_json(&self, job: &mut StrBuilder) {
         job.append("\n", 0.0, text_format());
-        job.append(self.original(), 0.0, text_format_color(GREY));
+        job.append(self.original(), 0.0, text_format_color(RAW_JSON));
     }
 
     fn matches_search(&self, search: &str) -> bool {

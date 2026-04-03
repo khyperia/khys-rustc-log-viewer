@@ -6,4 +6,5 @@ edition = "2024"
 [dependencies]
 anyhow = "*"
 eframe = "*"
+logparse = "*"
 yoke = "*"

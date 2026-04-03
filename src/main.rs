@@ -74,7 +74,27 @@ fn log_level_color(level: &str) -> Color32 {
     }
 }
 
+const LOGPARSE_ERROR: Color32 = alacritty::RED;
+fn logparse_color(kind: logparse::SpanKind) -> Color32 {
+    match kind {
+        logparse::SpanKind::Delimiter(_) => alacritty::DIM_RED,
+        logparse::SpanKind::Separator => alacritty::DIM_MAGENTA,
+        logparse::SpanKind::Number => alacritty::DIM_BLUE,
+        logparse::SpanKind::Literal => alacritty::DIM_BLUE,
+        logparse::SpanKind::String => alacritty::DIM_YELLOW,
+        logparse::SpanKind::Path => alacritty::DIM_WHITE,
+        logparse::SpanKind::Space(_) => alacritty::WHITE,
+        logparse::SpanKind::Constructor => alacritty::DIM_CYAN,
+        logparse::SpanKind::StringSurroundings => alacritty::DIM_RED,
+        logparse::SpanKind::Text => alacritty::WHITE,
+    }
+}
+
 const INDENT: f32 = 8.0;
+
+const LOGPARSE_CONFIG: logparse::Config = logparse::Config {
+    collapse_space: false,
+};
 
 fn main() -> anyhow::Result<()> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
@@ -89,7 +109,7 @@ fn main() -> anyhow::Result<()> {
     } else {
         Path::new(&args[0])
     };
-    let messages = read_lines(path, |s| custom_parse(s))?;
+    let messages = read_lines(path, custom_parse)?;
     eframe::run_native(
         "Khy's rustc log viewer",
         Default::default(),
@@ -591,6 +611,7 @@ impl Message {
     }
 
     fn ui(&mut self, parent: Option<&mut Message>, app_state: &mut AppState, ui: &mut Ui) {
+        self.logparse_single_message();
         let mut job = StrBuilder {
             job: LayoutJob::default(),
             app_state,
@@ -646,6 +667,16 @@ impl Message {
                 });
             }
         });
+    }
+
+    fn logparse_single_message(&mut self) {
+        self.yoke.with_mut(|parsed| {
+            if parsed.fields.len() == 1
+                && let Some(message) = parsed.fields.get_mut("message")
+            {
+                message.logparse();
+            }
+        })
     }
 
     fn main_text(&self, job: &mut StrBuilder) {
@@ -742,10 +773,10 @@ impl Message {
     ) {
         // common case
         if map.len() == 1
-            && let Some(SpanValue::String(message)) = map.get("message")
+            && let Some(message) = map.get("message")
         {
             job.append(" ", 0.0, text_format());
-            job.append(message, 0.0, text_format_color(FIELD_VALUES));
+            message.format(job);
             return;
         }
 
@@ -758,6 +789,7 @@ impl Message {
                         SpanValue::Bool(true) => 4,
                         SpanValue::Int(v) => format!("{v}").len(),
                         SpanValue::String(s) => s.len(),
+                        SpanValue::Logparsed(s) => s.backing_cart().len(),
                     }
             })
             .sum();
@@ -771,18 +803,7 @@ impl Message {
             job.append(sep, 0.0, text_format());
             job.append(key, indent, text_format_color(key_color));
             job.append(": ", 0.0, text_format_color(key_color));
-            let value = match value {
-                &SpanValue::Bool(v) => {
-                    if v {
-                        "true"
-                    } else {
-                        "false"
-                    }
-                }
-                &SpanValue::Int(v) => &format!("{v}"),
-                SpanValue::String(cow) => &**cow,
-            };
-            job.append(value, 0.0, text_format_color(FIELD_VALUES));
+            value.format(job);
         }
     }
 
@@ -809,6 +830,7 @@ fn dict_matches_search(map: &HashMap<Cow<str>, SpanValue>, search: &str) -> bool
                 SpanValue::Bool(_) => false,
                 SpanValue::Int(_) => false,
                 SpanValue::String(s) => s.contains(search),
+                SpanValue::Logparsed(logparsed) => logparsed.backing_cart().contains(search),
             }
     })
 }
@@ -884,6 +906,66 @@ enum SpanValue<'a> {
     Bool(bool),
     Int(u64),
     String(Cow<'a, str>),
+    // wrap in box to ensure enum stays 24 bytes
+    Logparsed(Box<Yoke<LogparsyYoke<'static>, Cow<'a, str>>>),
+}
+
+#[derive(yoke::Yokeable)]
+struct LogparsyYoke<'a>(Result<Vec<logparse::Span<'a>>, String>);
+
+impl<'a> SpanValue<'a> {
+    fn logparse(&mut self) {
+        let slf = std::mem::replace(self, SpanValue::String(Cow::Borrowed("")));
+        *self = slf.logparse_self();
+    }
+
+    fn logparse_self(self) -> Self {
+        if let Self::String(msg) = self {
+            let yoke = Yoke::attach_to_cart(msg, |l| match logparse::parse_input(l) {
+                Ok(v) => LogparsyYoke(Ok(logparse::into_spans(v, LOGPARSE_CONFIG))),
+                Err(e) => LogparsyYoke(Err(e)),
+            });
+            Self::Logparsed(Box::new(yoke))
+        } else {
+            self
+        }
+    }
+
+    fn format(&self, job: &mut StrBuilder) {
+        let value = match self {
+            &SpanValue::Bool(v) => {
+                if v {
+                    "true"
+                } else {
+                    "false"
+                }
+            }
+            &SpanValue::Int(v) => &format!("{v}"),
+            SpanValue::String(cow) => &**cow,
+            SpanValue::Logparsed(logparsed) => {
+                let parsed = logparsed.get();
+                match parsed {
+                    LogparsyYoke(Ok(parsed)) => {
+                        for span in parsed {
+                            let fmt = text_format_color(logparse_color(span.kind));
+                            job.append(&span.text, 0.0, fmt);
+                        }
+                    }
+                    LogparsyYoke(Err(err)) => {
+                        job.append(err, 0.0, text_format_color(LOGPARSE_ERROR));
+                        job.append(" ", 0.0, text_format_color(LOGPARSE_ERROR));
+                        job.append(
+                            logparsed.backing_cart(),
+                            0.0,
+                            text_format_color(FIELD_VALUES),
+                        );
+                    }
+                }
+                return;
+            }
+        };
+        job.append(value, 0.0, text_format_color(FIELD_VALUES));
+    }
 }
 
 #[derive(Debug)]

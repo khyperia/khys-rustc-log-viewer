@@ -86,11 +86,12 @@ fn logparse_color(kind: logparse::SpanKind) -> Color32 {
         logparse::SpanKind::Separator => alacritty::DIM_WHITE,
         logparse::SpanKind::Number => alacritty::CYAN,
         logparse::SpanKind::Literal => alacritty::CYAN,
+        logparse::SpanKind::Lifetime => alacritty::CYAN,
         logparse::SpanKind::String => alacritty::YELLOW,
         logparse::SpanKind::Path => alacritty::DIM_WHITE,
         logparse::SpanKind::Space(_) => alacritty::WHITE,
         logparse::SpanKind::Constructor => alacritty::BLUE,
-        logparse::SpanKind::StringSurroundings => alacritty::DIM_YELLOW,
+        logparse::SpanKind::Surroundings => alacritty::DIM_CYAN,
         logparse::SpanKind::Text => alacritty::WHITE,
     }
 }

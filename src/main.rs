@@ -12,8 +12,14 @@ use std::{
     fmt::{self, Debug, Display, Formatter},
     fs::File,
     io::{BufRead, BufReader},
-    path::Path,
+    path::PathBuf,
     str::{Chars, FromStr},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, SendError, TryRecvError},
+    },
+    time::Instant,
 };
 use yoke::Yoke;
 
@@ -77,15 +83,15 @@ fn log_level_color(level: &str) -> Color32 {
 const LOGPARSE_ERROR: Color32 = alacritty::RED;
 fn logparse_color(kind: logparse::SpanKind) -> Color32 {
     match kind {
-        logparse::SpanKind::Delimiter(_) => alacritty::DIM_RED,
-        logparse::SpanKind::Separator => alacritty::DIM_MAGENTA,
-        logparse::SpanKind::Number => alacritty::DIM_BLUE,
-        logparse::SpanKind::Literal => alacritty::DIM_BLUE,
-        logparse::SpanKind::String => alacritty::DIM_YELLOW,
+        logparse::SpanKind::Delimiter(_) => alacritty::WHITE,
+        logparse::SpanKind::Separator => alacritty::DIM_WHITE,
+        logparse::SpanKind::Number => alacritty::CYAN,
+        logparse::SpanKind::Literal => alacritty::CYAN,
+        logparse::SpanKind::String => alacritty::YELLOW,
         logparse::SpanKind::Path => alacritty::DIM_WHITE,
         logparse::SpanKind::Space(_) => alacritty::WHITE,
-        logparse::SpanKind::Constructor => alacritty::DIM_CYAN,
-        logparse::SpanKind::StringSurroundings => alacritty::DIM_RED,
+        logparse::SpanKind::Constructor => alacritty::BLUE,
+        logparse::SpanKind::StringSurroundings => alacritty::DIM_YELLOW,
         logparse::SpanKind::Text => alacritty::WHITE,
     }
 }
@@ -97,29 +103,38 @@ const LOGPARSE_CONFIG: logparse::Config = logparse::Config {
 };
 
 fn main() -> anyhow::Result<()> {
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
-    let targ = std::env::var("RUSTC_LOG_OUTPUT_TARGET");
-    let path = if args.is_empty()
-        && let Ok(f) = &targ
-    {
-        Path::new(f)
-    } else if args.len() != 1 {
-        println!("No file provided. Pass the file that was given to RUSTC_LOG_OUTPUT_TARGET");
-        return Ok(());
+    let mut args = std::env::args().skip(1);
+    let path = if let Some(first) = args.next() {
+        if args.next().is_none() {
+            PathBuf::from(first)
+        } else {
+            println!(
+                "Only one argument is allowed (the path that was given to RUSTC_LOG_OUTPUT_TARGET)"
+            );
+            return Ok(());
+        }
     } else {
-        Path::new(&args[0])
+        if let Ok(targ) = std::env::var("RUSTC_LOG_OUTPUT_TARGET") {
+            PathBuf::from(targ)
+        } else {
+            println!("No file provided. Pass the file that was given to RUSTC_LOG_OUTPUT_TARGET");
+            return Ok(());
+        }
     };
-    let messages = read_lines(path, custom_parse)?;
     eframe::run_native(
         "Khy's rustc log viewer",
         Default::default(),
-        Box::new(|cc| Ok(Box::new(App::new(cc, messages)))),
+        Box::new(|cc| Ok(Box::new(App::new(cc, path)))),
     )?;
     Ok(())
 }
 
 struct App {
     messages: Vec<Message>,
+    messages_reader: Receiver<Message>,
+    ui_has_been_notified: Arc<AtomicBool>,
+    start_time: Instant,
+    end_time: Option<Instant>,
     scroll_value: ScrollValue,
     state: AppState,
 }
@@ -152,7 +167,7 @@ impl AppState {
         }
     }
 
-    fn vdict_matches_search(&self, list: &[HashMap<Cow<str>, SpanValue>]) -> bool {
+    fn vdict_matches_search(&self, list: &[HashMap<Cow<str>, JsonValue>]) -> bool {
         if self.search.is_empty() {
             false
         } else {
@@ -163,9 +178,21 @@ impl AppState {
 }
 
 impl App {
-    fn new(_cc: &CreationContext, messages: Vec<Message>) -> Self {
+    fn new(cc: &CreationContext, path: PathBuf) -> Self {
+        let ui_has_been_notified = Arc::new(AtomicBool::new(false));
+        let atomic_bool = ui_has_been_notified.clone();
+        let egui_ctx = cc.egui_ctx.clone();
+        let messages_reader = read_lines(path, custom_parse, move || {
+            if !atomic_bool.swap(true, Ordering::Relaxed) {
+                egui_ctx.request_repaint();
+            }
+        });
         App {
-            messages,
+            messages: vec![],
+            messages_reader,
+            ui_has_been_notified,
+            start_time: Instant::now(),
+            end_time: None,
             scroll_value: Default::default(),
             state: AppState::new(),
         }
@@ -194,6 +221,20 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.ui_has_been_notified.store(false, Ordering::Relaxed);
+        loop {
+            match self.messages_reader.try_recv() {
+                Ok(message) => self.messages.push(message),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    if self.end_time.is_none() {
+                        self.end_time = Some(Instant::now());
+                    }
+                    break;
+                }
+            }
+        }
+
         let mut opened_search = false;
         ui.input_mut(|input| {
             scroller_mouse_input(input, &mut self.scroll_value);
@@ -258,6 +299,12 @@ impl eframe::App for App {
         Panel::top("filter panel").show_inside(ui, |ui| {
             let mut id_salt = 0;
             ui.horizontal(|ui| {
+                let end = self.end_time.unwrap_or_else(|| Instant::now());
+                ui.label(format!(
+                    "{} messages in {:?}",
+                    self.messages.len(),
+                    end - self.start_time,
+                ));
                 ui.checkbox(&mut self.state.timestamps, "timestamps");
                 ui.checkbox(&mut self.state.log_levels, "log levels");
                 ui.checkbox(&mut self.state.targets, "targets");
@@ -448,7 +495,7 @@ impl FilterKind {
             Self::Level => visit(&message.parsed().level),
             Self::Fields => message.parsed().fields.iter().any(|(k, v)| {
                 visit(k);
-                if let SpanValue::String(v) = v {
+                if let JsonValue::String(v) = v {
                     visit(v)
                 } else {
                     false
@@ -457,7 +504,7 @@ impl FilterKind {
             Self::Target => visit(&message.parsed().target),
             Self::Filename => visit(&message.parsed().filename),
             Self::SpanName => message.parsed().span.get("name").is_some_and(|n| {
-                if let SpanValue::String(n) = n {
+                if let JsonValue::String(n) = n {
                     visit(n)
                 } else {
                     false
@@ -466,7 +513,7 @@ impl FilterKind {
             Self::Spans => message.parsed().spans.iter().any(|n| {
                 n.iter().any(|(k, v)| {
                     visit(k);
-                    if let SpanValue::String(v) = v {
+                    if let JsonValue::String(v) = v {
                         visit(v)
                     } else {
                         false
@@ -500,19 +547,29 @@ impl FilterKind {
 }
 
 fn read_lines<E: Error + Send + Sync + 'static>(
-    path: &Path,
-    parse: impl for<'a> Fn(&'a str) -> Result<ParsedMessage<'a>, E>,
-) -> anyhow::Result<Vec<Message>> {
-    let file = File::open(path).unwrap();
-    let reader = BufReader::new(file);
-    let mut parent_stack = vec![];
-    let parse = &parse;
-    reader
-        .lines()
-        .enumerate()
-        //.take(100000)
-        .map(move |(i, s)| Message::new(s?, i, &mut parent_stack, parse))
-        .collect()
+    path: PathBuf,
+    parse: impl for<'a> Fn(&'a str) -> Result<ParsedMessage<'a>, E> + Sync + Send + 'static,
+    notify_ui_thread: impl Fn() + Send + 'static,
+) -> Receiver<Message> {
+    let (send, recv) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let file = File::open(path).unwrap();
+        let reader = BufReader::new(file);
+        let mut parent_stack = vec![];
+        let parse = &parse;
+        for (i, line) in reader.lines().enumerate() {
+            let line = line.unwrap();
+            let message = Message::new(line, i, &mut parent_stack, parse).unwrap();
+            match send.send(message) {
+                Ok(()) => (),
+                Err(SendError(_)) => break,
+            }
+            notify_ui_thread();
+        }
+    });
+
+    recv
 }
 
 #[inline]
@@ -709,7 +766,7 @@ impl Message {
         if target_displayed {
             job.append(&barsed.target, 0.0, text_format_color(TARGET));
         }
-        if let Some(SpanValue::String(name)) = barsed.span.get("name") {
+        if let Some(JsonValue::String(name)) = barsed.span.get("name") {
             if target_displayed {
                 job.append("::", 0.0, text_format_color(COLON_COLON));
             }
@@ -756,7 +813,7 @@ impl Message {
         for span in self.parsed().spans.iter().rev() {
             job.append("\n", 0.0, text_format());
             let name = match span.get("name") {
-                Some(SpanValue::String(name)) => name,
+                Some(JsonValue::String(name)) => name,
                 _ => "---",
             };
             job.append(name, INDENT, text_format_color(SPAN_NAME));
@@ -769,7 +826,7 @@ impl Message {
         job: &mut StrBuilder,
         mut indent: f32,
         key_color: Color32,
-        map: &HashMap<Cow<str>, SpanValue>,
+        map: &HashMap<Cow<str>, JsonValue>,
     ) {
         // common case
         if map.len() == 1
@@ -785,11 +842,11 @@ impl Message {
             .map(|(k, v)| {
                 k.len()
                     + match v {
-                        SpanValue::Bool(false) => 5,
-                        SpanValue::Bool(true) => 4,
-                        SpanValue::Int(v) => format!("{v}").len(),
-                        SpanValue::String(s) => s.len(),
-                        SpanValue::Logparsed(s) => s.backing_cart().len(),
+                        JsonValue::Bool(false) => 5,
+                        JsonValue::Bool(true) => 4,
+                        JsonValue::Int(v) => format!("{v}").len(),
+                        JsonValue::String(s) => s.len(),
+                        JsonValue::Logparsed(s) => s.backing_cart().len(),
                     }
             })
             .sum();
@@ -823,14 +880,14 @@ impl Message {
     }
 }
 
-fn dict_matches_search(map: &HashMap<Cow<str>, SpanValue>, search: &str) -> bool {
+fn dict_matches_search(map: &HashMap<Cow<str>, JsonValue>, search: &str) -> bool {
     map.iter().any(|(k, v)| {
         k.contains(search)
             || match v {
-                SpanValue::Bool(_) => false,
-                SpanValue::Int(_) => false,
-                SpanValue::String(s) => s.contains(search),
-                SpanValue::Logparsed(logparsed) => logparsed.backing_cart().contains(search),
+                JsonValue::Bool(_) => false,
+                JsonValue::Int(_) => false,
+                JsonValue::String(s) => s.contains(search),
+                JsonValue::Logparsed(logparsed) => logparsed.backing_cart().contains(search),
             }
     })
 }
@@ -878,31 +935,32 @@ impl StrBuilder<'_> {
 struct ParsedMessage<'a> {
     timestamp: Cow<'a, str>,
     level: Cow<'a, str>,
-    fields: HashMap<Cow<'a, str>, SpanValue<'a>>,
+    fields: HashMap<Cow<'a, str>, JsonValue<'a>>,
     target: Cow<'a, str>,
     filename: Cow<'a, str>,
     line_number: u64,
-    span: HashMap<Cow<'a, str>, SpanValue<'a>>,
-    spans: Vec<HashMap<Cow<'a, str>, SpanValue<'a>>>,
+    span: HashMap<Cow<'a, str>, JsonValue<'a>>,
+    spans: Vec<HashMap<Cow<'a, str>, JsonValue<'a>>>,
 }
 
 impl ParsedMessage<'_> {
     fn hop_message(&self) -> Option<HopMessageKind> {
         self.fields.get("message").and_then(|v| {
-            if let SpanValue::String(v) = v {
-                match &**v {
-                    "enter" => Some(HopMessageKind::Enter),
-                    "exit" => Some(HopMessageKind::Exit),
-                    _ => None,
-                }
-            } else {
-                None
+            let v: &str = match v {
+                JsonValue::String(v) => v,
+                JsonValue::Logparsed(v) => v.backing_cart(),
+                _ => return None,
+            };
+            match v {
+                "enter" => Some(HopMessageKind::Enter),
+                "exit" => Some(HopMessageKind::Exit),
+                _ => None,
             }
         })
     }
 }
 
-enum SpanValue<'a> {
+enum JsonValue<'a> {
     Bool(bool),
     Int(u64),
     String(Cow<'a, str>),
@@ -913,17 +971,18 @@ enum SpanValue<'a> {
 #[derive(yoke::Yokeable)]
 struct LogparsyYoke<'a>(Result<Vec<logparse::Span<'a>>, String>);
 
-impl<'a> SpanValue<'a> {
+impl<'a> JsonValue<'a> {
     fn logparse(&mut self) {
-        let slf = std::mem::replace(self, SpanValue::String(Cow::Borrowed("")));
+        let slf = std::mem::replace(self, JsonValue::String(Cow::Borrowed("")));
         *self = slf.logparse_self();
     }
 
     fn logparse_self(self) -> Self {
         if let Self::String(msg) = self {
-            let yoke = Yoke::attach_to_cart(msg, |l| match logparse::parse_input(l) {
-                Ok(v) => LogparsyYoke(Ok(logparse::into_spans(v, LOGPARSE_CONFIG))),
-                Err(e) => LogparsyYoke(Err(e)),
+            let yoke = Yoke::attach_to_cart(msg, |l| {
+                LogparsyYoke(
+                    logparse::parse_input(l).map(|v| logparse::into_spans(v, LOGPARSE_CONFIG)),
+                )
             });
             Self::Logparsed(Box::new(yoke))
         } else {
@@ -933,16 +992,16 @@ impl<'a> SpanValue<'a> {
 
     fn format(&self, job: &mut StrBuilder) {
         let value = match self {
-            &SpanValue::Bool(v) => {
+            &JsonValue::Bool(v) => {
                 if v {
                     "true"
                 } else {
                     "false"
                 }
             }
-            &SpanValue::Int(v) => &format!("{v}"),
-            SpanValue::String(cow) => &**cow,
-            SpanValue::Logparsed(logparsed) => {
+            &JsonValue::Int(v) => &format!("{v}"),
+            JsonValue::String(cow) => &**cow,
+            JsonValue::Logparsed(logparsed) => {
                 let parsed = logparsed.get();
                 match parsed {
                     LogparsyYoke(Ok(parsed)) => {
@@ -1052,7 +1111,7 @@ fn custom_parse2<'a>(iter: &mut Chars<'a>) -> Result<ParsedMessage<'a>, InnerPar
 
 fn parse_dicts<'a>(
     iter: &mut Chars<'a>,
-    result: &mut Vec<HashMap<Cow<'a, str>, SpanValue<'a>>>,
+    result: &mut Vec<HashMap<Cow<'a, str>, JsonValue<'a>>>,
 ) -> Result<(), InnerParseError<'a>> {
     expect(iter, '[')?;
     let mut iter_clone = iter.clone();
@@ -1077,7 +1136,7 @@ fn parse_dicts<'a>(
 
 fn parse_dict<'a>(
     iter: &mut Chars<'a>,
-    result: &mut HashMap<Cow<'a, str>, SpanValue<'a>>,
+    result: &mut HashMap<Cow<'a, str>, JsonValue<'a>>,
 ) -> Result<(), InnerParseError<'a>> {
     expect(iter, '{')?;
     loop {
@@ -1088,21 +1147,21 @@ fn parse_dict<'a>(
             .next()
             .ok_or(InnerParseError::UnexpectedEof("dict key"))?
         {
-            '"' => SpanValue::String(parse_string_after_quote(iter)?),
+            '"' => JsonValue::String(parse_string_after_quote(iter)?),
             't' => {
                 expect(iter, 'r')?;
                 expect(iter, 'u')?;
                 expect(iter, 'e')?;
-                SpanValue::Bool(true)
+                JsonValue::Bool(true)
             }
             'f' => {
                 expect(iter, 'a')?;
                 expect(iter, 'l')?;
                 expect(iter, 's')?;
                 expect(iter, 'e')?;
-                SpanValue::Bool(false)
+                JsonValue::Bool(false)
             }
-            ch if ch.is_ascii_digit() => SpanValue::Int(parse_number_after_digit(start, iter)?),
+            ch if ch.is_ascii_digit() => JsonValue::Int(parse_number_after_digit(start, iter)?),
             ch => break Err(InnerParseError::UnexpectedChar(&['"', 't', 'f', '0'], ch)),
         };
         result.insert(key, value);
@@ -1125,24 +1184,26 @@ fn parse_string_after_quote<'a>(iter: &mut Chars<'a>) -> Result<Cow<'a, str>, In
         return Err(InnerParseError::UnexpectedEof("string"));
     };
     let str_to_quot = &str_begin[..quot];
-    if let Some(_backslash) = str_to_quot.find('\\') {
-    } else {
+    let Some(backslash_index) = str_to_quot.find('\\') else {
         *iter = str_begin[(quot + 1)..].chars();
         return Ok(Cow::Borrowed(str_to_quot));
-    }
+    };
     // approx. 1.43% of strings had an escape in the dataset I used to test
+    let mut result = str_begin[..backslash_index].to_string();
+    *iter = str_begin[backslash_index..].chars();
     loop {
         let ch = iter
             .next()
             .ok_or(InnerParseError::UnexpectedEof("escaped string"))?;
         if ch == '"' {
-            let str_end = iter.as_str();
-            let len = str_begin.len() - (str_end.len() + 1);
-            break Ok(Cow::Borrowed(&str_begin[..len]));
+            break Ok(Cow::Owned(result));
         } else if ch == '\\' {
-            let Some(_escaped_ch) = iter.next() else {
+            let Some(escaped_ch) = iter.next() else {
                 break Err(InnerParseError::UnexpectedEof("escape sequence"));
             };
+            result.push(escaped_ch);
+        } else {
+            result.push(ch);
         }
     }
 }

@@ -310,7 +310,7 @@ impl<'b> eframe::App for App<'b> {
         Panel::top("filter panel").show_inside(ui, |ui| {
             let mut id_salt = 0;
             ui.horizontal(|ui| {
-                let end = self.end_time.unwrap_or_else(|| Instant::now());
+                let end = self.end_time.unwrap_or_else(Instant::now);
                 ui.label(format!(
                     "{} messages in {:?}",
                     self.messages.len(),
@@ -460,9 +460,7 @@ impl Filter {
         if self.filter.is_empty() {
             true
         } else {
-            let raw = self.matches_raw(message);
-            // TODO: xor :3
-            if self.exclude { !raw } else { raw }
+            self.exclude ^ self.matches_raw(message)
         }
     }
 
@@ -502,8 +500,8 @@ enum FilterKind {
 impl FilterKind {
     fn run(&self, message: &Message, mut visit: impl FnMut(&str) -> bool) -> bool {
         match self {
-            Self::Timestamp => visit(&message.parsed().timestamp),
-            Self::Level => visit(&message.parsed().level),
+            Self::Timestamp => visit(message.parsed().timestamp),
+            Self::Level => visit(message.parsed().level),
             Self::Fields => message.parsed().fields.iter().any(|(k, v)| {
                 visit(k);
                 if let JsonValue::String(v) = v {
@@ -512,9 +510,9 @@ impl FilterKind {
                     false
                 }
             }),
-            Self::Target => visit(&message.parsed().target),
-            Self::Filename => visit(&message.parsed().filename),
-            Self::LineNumber => visit(&message.parsed().line_number),
+            Self::Target => visit(message.parsed().target),
+            Self::Filename => visit(message.parsed().filename),
+            Self::LineNumber => visit(message.parsed().line_number),
             Self::SpanName => message.parsed().span.get("name").is_some_and(|n| {
                 if let JsonValue::String(n) = n {
                     visit(n)
@@ -693,8 +691,8 @@ impl<'b> Message<'b> {
         self.main_text(&mut job);
         if self.state.display_filename
             || !job.found_search
-                && (job.app_state.matches_search(&parsed.filename)
-                    || job.app_state.matches_search(&parsed.line_number))
+                && (job.app_state.matches_search(parsed.filename)
+                    || job.app_state.matches_search(parsed.line_number))
         {
             self.filename(&mut job);
         }
@@ -764,19 +762,18 @@ impl<'b> Message<'b> {
             job.append(text, 0.0, text_format_color(SPAN));
         }
 
-        if job.app_state.timestamps || job.app_state.matches_search(&barsed.timestamp) {
-            job.append(&barsed.timestamp, 0.0, text_format_color(TIMESTAMP));
+        if job.app_state.timestamps || job.app_state.matches_search(barsed.timestamp) {
+            job.append(barsed.timestamp, 0.0, text_format_color(TIMESTAMP));
             job.append(" ", 0.0, text_format());
         }
-        if job.app_state.log_levels || job.app_state.matches_search(&barsed.level) {
-            let color = log_level_color(&barsed.level);
-            job.append(&barsed.level, 0.0, text_format_color(color));
+        if job.app_state.log_levels || job.app_state.matches_search(barsed.level) {
+            let color = log_level_color(barsed.level);
+            job.append(barsed.level, 0.0, text_format_color(color));
             job.append(" ", 0.0, text_format());
         }
-        let target_displayed =
-            job.app_state.targets || job.app_state.matches_search(&barsed.target);
+        let target_displayed = job.app_state.targets || job.app_state.matches_search(barsed.target);
         if target_displayed {
-            job.append(&barsed.target, 0.0, text_format_color(TARGET));
+            job.append(barsed.target, 0.0, text_format_color(TARGET));
         }
         if let Some(JsonValue::String(name)) = barsed.span.get("name") {
             if target_displayed {
@@ -785,7 +782,7 @@ impl<'b> Message<'b> {
             job.append(name, 0.0, text_format_color(SPAN_NAME));
         } else if !target_displayed {
             // TODO: DRY
-            job.append(&barsed.target, 0.0, text_format_color(TARGET));
+            job.append(barsed.target, 0.0, text_format_color(TARGET));
         }
         if barsed.fields.len() == 1
             && let Some(hop) = barsed.hop_message()
@@ -811,7 +808,7 @@ impl<'b> Message<'b> {
     fn filename(&self, job: &mut StrBuilder) {
         let parsed = self.parsed();
         job.append("\n", 0.0, text_format());
-        job.append(&parsed.filename, INDENT, text_format_color(FILENAME));
+        job.append(parsed.filename, INDENT, text_format_color(FILENAME));
         job.append(":", 0.0, text_format_color(FILENAME));
         job.append(parsed.line_number, 0.0, text_format_color(FILENAME));
     }
@@ -1034,7 +1031,7 @@ impl Display for ParseError {
 
 impl Error for ParseError {}
 
-fn custom_parse<'a, 'b>(bump: &'b Bump, s: &'a str) -> Result<ParsedMessage<'b>, ParseError> {
+fn custom_parse<'b>(bump: &'b Bump, s: &str) -> Result<ParsedMessage<'b>, ParseError> {
     custom_parse2(bump, &mut s.chars()).map_err(|inner| ParseError {
         line: s.to_string(),
         message: format!("{}", inner),
@@ -1078,7 +1075,7 @@ fn custom_parse2<'a, 'b>(
     loop {
         let key = parse_string(bump, iter)?;
         expect(iter, ':')?;
-        match &*key {
+        match key {
             "timestamp" => result.timestamp = parse_string(bump, iter)?,
             "level" => result.level = parse_string(bump, iter)?,
             "fields" => parse_dict(bump, iter, &mut result.fields)?,
@@ -1180,37 +1177,37 @@ fn parse_string_after_quote<'a, 'b>(
 ) -> Result<&'b str, InnerParseError<'b>> {
     let str_begin = iter.as_str();
     let mut backslash_count = 0;
-    let mut cur_index = 0;
+    let mut index = 0;
     let end_index = loop {
-        let Some(index) = str_begin[cur_index..].find(['"', '\\']) else {
+        if let Some(tmp) = str_begin[index..].find(['"', '\\']) {
+            index += tmp;
+        } else {
             return Err(InnerParseError::UnexpectedEof("string"));
-        };
-        let index = index + cur_index;
-        if str_begin.as_bytes()[index] == b'"' {
+        }
+        if str_begin.as_bytes()[index] == b'\\' {
+            backslash_count += 1;
+            let mut char_skipper = str_begin[(index + 1)..].chars();
+            // skip the escaped char
+            if char_skipper.next().is_none() {
+                return Err(InnerParseError::UnexpectedEof("string backslash"));
+            }
+            index = str_begin.len() - char_skipper.as_str().len();
+        } else {
+            *iter = str_begin[(index + 1)..].chars();
             if backslash_count == 0 {
                 // There are no backslashes. Use a direct bumpalo alloc_str to copy the data into
                 // bumpalo.
-                *iter = str_begin[(index + 1)..].chars();
                 return Ok(bump.alloc_str(&str_begin[..index]));
             } else {
                 // There are backslashes. Do a custom alloc_slice_fill_with to skip over the
                 // backslashes while copying.
                 break index;
             }
-        } else {
-            backslash_count += 1;
-            let mut asdf = str_begin[(index + 1)..].chars();
-            // skip the escaped char
-            if let None = asdf.next() {
-                return Err(InnerParseError::UnexpectedEof("string backslash"));
-            }
-            cur_index = str_begin.len() - asdf.as_str().len();
         }
     };
 
-    *iter = str_begin[(end_index + 1)..].chars();
     let mut i = 0;
-    let fullslice = str_begin[..end_index].as_bytes();
+    let fullslice = &str_begin.as_bytes()[..end_index];
     let result = bump.alloc_slice_fill_with(end_index - backslash_count, |_| {
         let mut result = fullslice[i];
         // backslash is a single ascii character, so it can be detected as a u8
@@ -1261,7 +1258,6 @@ fn parse_number_after_digit<'a, 'b>(
         *iter = cloned;
     };
     Ok(bump.alloc_str(slice))
-    //T::from_str(slice).map_err(|_| InnerParseError::InvalidNumber(slice))
 }
 
 fn expect<'a>(iter: &mut Chars<'a>, ch: char) -> Result<(), InnerParseError<'static>> {

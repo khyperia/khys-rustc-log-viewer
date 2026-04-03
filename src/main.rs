@@ -1,3 +1,4 @@
+use bumpalo::Bump;
 use eframe::{
     CreationContext,
     egui::{
@@ -6,7 +7,6 @@ use eframe::{
     },
 };
 use std::{
-    borrow::Cow,
     collections::HashMap,
     error::Error,
     fmt::{self, Debug, Display, Formatter},
@@ -68,7 +68,6 @@ const COLON_COLON: Color32 = alacritty::WHITE;
 const SPAN_NAME: Color32 = alacritty::GREEN;
 const TIMESTAMP: Color32 = alacritty::DIM_WHITE;
 const FILENAME: Color32 = alacritty::DIM_WHITE;
-const RAW_JSON: Color32 = alacritty::DIM_WHITE;
 
 fn log_level_color(level: &str) -> Color32 {
     match level {
@@ -121,17 +120,20 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
     };
-    eframe::run_native(
-        "Khy's rustc log viewer",
-        Default::default(),
-        Box::new(|cc| Ok(Box::new(App::new(cc, path)))),
-    )?;
+    let mut bump = Bump::new();
+    std::thread::scope(|scope| {
+        eframe::run_native(
+            "Khy's rustc log viewer",
+            Default::default(),
+            Box::new(|cc| Ok(Box::new(App::new(cc, &mut bump, scope, path)))),
+        )
+    })?;
     Ok(())
 }
 
-struct App {
-    messages: Vec<Message>,
-    messages_reader: Receiver<Message>,
+struct App<'b> {
+    messages: Vec<Message<'b>>,
+    messages_reader: Receiver<Message<'b>>,
     ui_has_been_notified: Arc<AtomicBool>,
     start_time: Instant,
     end_time: Option<Instant>,
@@ -167,7 +169,7 @@ impl AppState {
         }
     }
 
-    fn vdict_matches_search(&self, list: &[HashMap<Cow<str>, JsonValue>]) -> bool {
+    fn vdict_matches_search(&self, list: &[HashMap<&str, JsonValue>]) -> bool {
         if self.search.is_empty() {
             false
         } else {
@@ -177,12 +179,20 @@ impl AppState {
     }
 }
 
-impl App {
-    fn new(cc: &CreationContext, path: PathBuf) -> Self {
+impl<'b> App<'b> {
+    fn new<'scope, 'env>(
+        cc: &CreationContext,
+        bump: &'b mut Bump,
+        scope: &'scope std::thread::Scope<'scope, 'env>,
+        path: PathBuf,
+    ) -> Self
+    where
+        'b: 'scope,
+    {
         let ui_has_been_notified = Arc::new(AtomicBool::new(false));
         let atomic_bool = ui_has_been_notified.clone();
         let egui_ctx = cc.egui_ctx.clone();
-        let messages_reader = read_lines(path, custom_parse, move || {
+        let messages_reader = read_lines(bump, scope, path, move || {
             if !atomic_bool.swap(true, Ordering::Relaxed) {
                 egui_ctx.request_repaint();
             }
@@ -219,7 +229,7 @@ impl App {
     }
 }
 
-impl eframe::App for App {
+impl<'b> eframe::App for App<'b> {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.ui_has_been_notified.store(false, Ordering::Relaxed);
         loop {
@@ -546,26 +556,33 @@ impl FilterKind {
     ];
 }
 
-fn read_lines<E: Error + Send + Sync + 'static>(
+fn read_lines<'b: 'scope, 'scope, 'env>(
+    bump: &'b mut Bump,
+    scope: &'scope std::thread::Scope<'scope, 'env>,
     path: PathBuf,
-    parse: impl for<'a> Fn(&'a str) -> Result<ParsedMessage<'a>, E> + Sync + Send + 'static,
     notify_ui_thread: impl Fn() + Send + 'static,
-) -> Receiver<Message> {
+) -> Receiver<Message<'b>> {
     let (send, recv) = mpsc::channel();
 
-    std::thread::spawn(move || {
+    scope.spawn(move || {
         let file = File::open(path).unwrap();
-        let reader = BufReader::new(file);
+        let mut reader = BufReader::new(file);
         let mut parent_stack = vec![];
-        let parse = &parse;
-        for (i, line) in reader.lines().enumerate() {
-            let line = line.unwrap();
-            let message = Message::new(line, i, &mut parent_stack, parse).unwrap();
+        let mut i = 0;
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let bytes_read = reader.read_line(&mut line).unwrap();
+            if bytes_read == 0 {
+                break;
+            }
+            let message = Message::new(bump, &line, i, &mut parent_stack).unwrap();
             match send.send(message) {
                 Ok(()) => (),
                 Err(SendError(_)) => break,
             }
             notify_ui_thread();
+            i += 1;
         }
     });
 
@@ -589,8 +606,8 @@ fn text_format_color(color: Color32) -> TextFormat {
     }
 }
 
-struct Message {
-    yoke: Yoke<ParsedMessage<'static>, String>,
+struct Message<'b> {
+    parsed: ParsedMessage<'b>,
     parent: Option<usize>,
     indent: usize,
     state: MessageState,
@@ -601,18 +618,16 @@ struct MessageState {
     hide_children: bool,
     display_filename: bool,
     display_spans: bool,
-    display_raw_json: bool,
 }
 
-impl Message {
-    fn new<E: Error + Send + Sync + 'static>(
-        line: String,
+impl<'b> Message<'b> {
+    fn new(
+        bump: &'b Bump,
+        line: &str,
         index: usize,
         parent_stack: &mut Vec<usize>,
-        parse: impl for<'a> FnOnce(&'a str) -> Result<ParsedMessage<'a>, E>,
     ) -> anyhow::Result<Self> {
-        let yoke = Yoke::try_attach_to_cart(line, |l| parse(l))?;
-        let parsed: &ParsedMessage = yoke.get();
+        let parsed = custom_parse(bump, line)?;
         let msg = parsed.hop_message();
         let parent = parent_stack.last().cloned();
         if msg == Some(HopMessageKind::Exit) {
@@ -624,19 +639,15 @@ impl Message {
         }
 
         Ok(Self {
-            yoke,
+            parsed,
             parent,
             indent: self_indent,
             state: Default::default(),
         })
     }
 
-    fn original(&self) -> &str {
-        self.yoke.backing_cart()
-    }
-
-    fn parsed<'a: 'b, 'b>(&'a self) -> &'a ParsedMessage<'b> {
-        self.yoke.get()
+    fn parsed(&self) -> &ParsedMessage<'b> {
+        &self.parsed
     }
 
     fn is_displayed(&self, messages: &[Message], app_state: &AppState) -> bool {
@@ -686,9 +697,6 @@ impl Message {
         {
             self.spans(&mut job);
         }
-        if self.state.display_raw_json {
-            self.raw_json(&mut job);
-        }
         let rsp = if !job.found_search
             && !job.app_state.search.is_empty()
             && self.matches_search(&job.app_state.search)
@@ -715,7 +723,6 @@ impl Message {
             if !self.parsed().spans.is_empty() {
                 ui.checkbox(&mut self.state.display_spans, "spans");
             }
-            ui.checkbox(&mut self.state.display_raw_json, "raw json");
             if ui.button("exclude target filter").clicked() {
                 app_state.filters.push(Filter {
                     kind: FilterKind::Target,
@@ -727,13 +734,12 @@ impl Message {
     }
 
     fn logparse_single_message(&mut self) {
-        self.yoke.with_mut(|parsed| {
-            if parsed.fields.len() == 1
-                && let Some(message) = parsed.fields.get_mut("message")
-            {
-                message.logparse();
-            }
-        })
+        let parsed = &mut self.parsed;
+        if parsed.fields.len() == 1
+            && let Some(message) = parsed.fields.get_mut("message")
+        {
+            message.logparse();
+        }
     }
 
     fn main_text(&self, job: &mut StrBuilder) {
@@ -826,7 +832,7 @@ impl Message {
         job: &mut StrBuilder,
         mut indent: f32,
         key_color: Color32,
-        map: &HashMap<Cow<str>, JsonValue>,
+        map: &HashMap<&str, JsonValue>,
     ) {
         // common case
         if map.len() == 1
@@ -864,11 +870,6 @@ impl Message {
         }
     }
 
-    fn raw_json(&self, job: &mut StrBuilder) {
-        job.append("\n", 0.0, text_format());
-        job.append(self.original(), 0.0, text_format_color(RAW_JSON));
-    }
-
     fn matches_search(&self, search: &str) -> bool {
         let parsed = self.parsed();
         parsed.timestamp.contains(search)
@@ -880,7 +881,7 @@ impl Message {
     }
 }
 
-fn dict_matches_search(map: &HashMap<Cow<str>, JsonValue>, search: &str) -> bool {
+fn dict_matches_search(map: &HashMap<&str, JsonValue>, search: &str) -> bool {
     map.iter().any(|(k, v)| {
         k.contains(search)
             || match v {
@@ -932,18 +933,18 @@ impl StrBuilder<'_> {
 }
 
 #[derive(Default, yoke::Yokeable)]
-struct ParsedMessage<'a> {
-    timestamp: Cow<'a, str>,
-    level: Cow<'a, str>,
-    fields: HashMap<Cow<'a, str>, JsonValue<'a>>,
-    target: Cow<'a, str>,
-    filename: Cow<'a, str>,
+struct ParsedMessage<'b> {
+    timestamp: &'b str,
+    level: &'b str,
+    fields: HashMap<&'b str, JsonValue<'b>>,
+    target: &'b str,
+    filename: &'b str,
     line_number: u64,
-    span: HashMap<Cow<'a, str>, JsonValue<'a>>,
-    spans: Vec<HashMap<Cow<'a, str>, JsonValue<'a>>>,
+    span: HashMap<&'b str, JsonValue<'b>>,
+    spans: Vec<HashMap<&'b str, JsonValue<'b>>>,
 }
 
-impl ParsedMessage<'_> {
+impl<'b> ParsedMessage<'b> {
     fn hop_message(&self) -> Option<HopMessageKind> {
         self.fields.get("message").and_then(|v| {
             let v: &str = match v {
@@ -960,20 +961,22 @@ impl ParsedMessage<'_> {
     }
 }
 
-enum JsonValue<'a> {
+enum JsonValue<'b> {
     Bool(bool),
     Int(u64),
-    String(Cow<'a, str>),
+    String(&'b str),
     // wrap in box to ensure enum stays 24 bytes
-    Logparsed(Box<Yoke<LogparsyYoke<'static>, Cow<'a, str>>>),
+    Logparsed(Box<Yoke<LogparsyYoke<'static>, &'b str>>),
 }
+
+const _: [(); 24] = [(); std::mem::size_of::<JsonValue>()];
 
 #[derive(yoke::Yokeable)]
 struct LogparsyYoke<'a>(Result<Vec<logparse::Span<'a>>, String>);
 
-impl<'a> JsonValue<'a> {
+impl<'b> JsonValue<'b> {
     fn logparse(&mut self) {
-        let slf = std::mem::replace(self, JsonValue::String(Cow::Borrowed("")));
+        let slf = std::mem::replace(self, JsonValue::String(""));
         *self = slf.logparse_self();
     }
 
@@ -1044,22 +1047,22 @@ impl Display for ParseError {
 
 impl Error for ParseError {}
 
-fn custom_parse<'a>(s: &'a str) -> Result<ParsedMessage<'a>, ParseError> {
-    custom_parse2(&mut s.chars()).map_err(|inner| ParseError {
+fn custom_parse<'a, 'b>(bump: &'b Bump, s: &'a str) -> Result<ParsedMessage<'b>, ParseError> {
+    custom_parse2(bump, &mut s.chars()).map_err(|inner| ParseError {
         line: s.to_string(),
         message: format!("{}", inner),
     })
 }
 
-enum InnerParseError<'a> {
-    UnknownField(Cow<'a, str>),
+enum InnerParseError<'a, 'b> {
+    UnknownField(&'b str),
     UnexpectedEof(&'static str),
     UnexpectedChar(&'static [char], char),
     UnexpectedCharSingle(char, char),
     InvalidNumber(&'a str),
 }
 
-impl Display for InnerParseError<'_> {
+impl Display for InnerParseError<'_, '_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownField(field) => f.write_fmt(format_args!("unknown field {}", field)),
@@ -1079,23 +1082,26 @@ impl Display for InnerParseError<'_> {
     }
 }
 
-fn custom_parse2<'a>(iter: &mut Chars<'a>) -> Result<ParsedMessage<'a>, InnerParseError<'a>> {
+fn custom_parse2<'a, 'b>(
+    bump: &'b Bump,
+    iter: &mut Chars<'a>,
+) -> Result<ParsedMessage<'b>, InnerParseError<'a, 'b>> {
     let mut result = ParsedMessage::default();
 
     expect(iter, '{')?;
 
     loop {
-        let key = parse_string(iter)?;
+        let key = parse_string(bump, iter)?;
         expect(iter, ':')?;
         match &*key {
-            "timestamp" => result.timestamp = parse_string(iter)?,
-            "level" => result.level = parse_string(iter)?,
-            "fields" => parse_dict(iter, &mut result.fields)?,
-            "target" => result.target = parse_string(iter)?,
-            "filename" => result.filename = parse_string(iter)?,
+            "timestamp" => result.timestamp = parse_string(bump, iter)?,
+            "level" => result.level = parse_string(bump, iter)?,
+            "fields" => parse_dict(bump, iter, &mut result.fields)?,
+            "target" => result.target = parse_string(bump, iter)?,
+            "filename" => result.filename = parse_string(bump, iter)?,
             "line_number" => result.line_number = parse_number(iter)?,
-            "span" => parse_dict(iter, &mut result.span)?,
-            "spans" => parse_dicts(iter, &mut result.spans)?,
+            "span" => parse_dict(bump, iter, &mut result.span)?,
+            "spans" => parse_dicts(bump, iter, &mut result.spans)?,
             _ => break Err(InnerParseError::UnknownField(key)),
         }
         match iter
@@ -1109,10 +1115,11 @@ fn custom_parse2<'a>(iter: &mut Chars<'a>) -> Result<ParsedMessage<'a>, InnerPar
     }
 }
 
-fn parse_dicts<'a>(
+fn parse_dicts<'a, 'b>(
+    bump: &'b Bump,
     iter: &mut Chars<'a>,
-    result: &mut Vec<HashMap<Cow<'a, str>, JsonValue<'a>>>,
-) -> Result<(), InnerParseError<'a>> {
+    result: &mut Vec<HashMap<&'b str, JsonValue<'b>>>,
+) -> Result<(), InnerParseError<'a, 'b>> {
     expect(iter, '[')?;
     let mut iter_clone = iter.clone();
     if iter_clone.next() == Some(']') {
@@ -1121,7 +1128,7 @@ fn parse_dicts<'a>(
     }
     loop {
         let mut single = Default::default();
-        parse_dict(iter, &mut single)?;
+        parse_dict(bump, iter, &mut single)?;
         result.push(single);
         match iter
             .next()
@@ -1134,20 +1141,21 @@ fn parse_dicts<'a>(
     }
 }
 
-fn parse_dict<'a>(
+fn parse_dict<'a, 'b>(
+    bump: &'b Bump,
     iter: &mut Chars<'a>,
-    result: &mut HashMap<Cow<'a, str>, JsonValue<'a>>,
-) -> Result<(), InnerParseError<'a>> {
+    result: &mut HashMap<&'b str, JsonValue<'b>>,
+) -> Result<(), InnerParseError<'a, 'b>> {
     expect(iter, '{')?;
     loop {
-        let key = parse_string(iter)?;
+        let key = parse_string(bump, iter)?;
         expect(iter, ':')?;
         let start = iter.as_str();
         let value = match iter
             .next()
             .ok_or(InnerParseError::UnexpectedEof("dict key"))?
         {
-            '"' => JsonValue::String(parse_string_after_quote(iter)?),
+            '"' => JsonValue::String(parse_string_after_quote(bump, iter)?),
             't' => {
                 expect(iter, 'r')?;
                 expect(iter, 'u')?;
@@ -1173,42 +1181,70 @@ fn parse_dict<'a>(
     }
 }
 
-fn parse_string<'a>(iter: &mut Chars<'a>) -> Result<Cow<'a, str>, InnerParseError<'a>> {
+fn parse_string<'a, 'b>(
+    bump: &'b Bump,
+    iter: &mut Chars<'a>,
+) -> Result<&'b str, InnerParseError<'a, 'b>> {
     expect(iter, '"')?;
-    parse_string_after_quote(iter)
+    parse_string_after_quote(bump, iter)
 }
 
-fn parse_string_after_quote<'a>(iter: &mut Chars<'a>) -> Result<Cow<'a, str>, InnerParseError<'a>> {
+fn parse_string_after_quote<'a, 'b>(
+    bump: &'b Bump,
+    iter: &mut Chars<'a>,
+) -> Result<&'b str, InnerParseError<'a, 'b>> {
     let str_begin = iter.as_str();
-    let Some(quot) = str_begin.find('"') else {
-        return Err(InnerParseError::UnexpectedEof("string"));
-    };
-    let str_to_quot = &str_begin[..quot];
-    let Some(backslash_index) = str_to_quot.find('\\') else {
-        *iter = str_begin[(quot + 1)..].chars();
-        return Ok(Cow::Borrowed(str_to_quot));
-    };
-    // approx. 1.43% of strings had an escape in the dataset I used to test
-    let mut result = str_begin[..backslash_index].to_string();
-    *iter = str_begin[backslash_index..].chars();
-    loop {
-        let ch = iter
-            .next()
-            .ok_or(InnerParseError::UnexpectedEof("escaped string"))?;
-        if ch == '"' {
-            break Ok(Cow::Owned(result));
-        } else if ch == '\\' {
-            let Some(escaped_ch) = iter.next() else {
-                break Err(InnerParseError::UnexpectedEof("escape sequence"));
-            };
-            result.push(escaped_ch);
+    let mut backslash_count = 0;
+    let mut cur_index = 0;
+    let end_index = loop {
+        let Some(index) = str_begin[cur_index..].find(['"', '\\']) else {
+            return Err(InnerParseError::UnexpectedEof("string"));
+        };
+        let index = index + cur_index;
+        if str_begin.as_bytes()[index] == b'"' {
+            if backslash_count == 0 {
+                // There are no backslashes. Use a direct bumpalo alloc_str to copy the data into
+                // bumpalo.
+                *iter = str_begin[(index + 1)..].chars();
+                return Ok(bump.alloc_str(&str_begin[..index]));
+            } else {
+                // There are backslashes. Do a custom alloc_slice_fill_with to skip over the
+                // backslashes while copying.
+                break index;
+            }
         } else {
-            result.push(ch);
+            backslash_count += 1;
+            let mut asdf = str_begin[(index + 1)..].chars();
+            // skip the escaped char
+            if let None = asdf.next() {
+                return Err(InnerParseError::UnexpectedEof("string backslash"));
+            }
+            cur_index = str_begin.len() - asdf.as_str().len();
         }
-    }
+    };
+
+    *iter = str_begin[(end_index + 1)..].chars();
+    let mut i = 0;
+    let fullslice = str_begin[..end_index].as_bytes();
+    let result = bump.alloc_slice_fill_with(end_index - backslash_count, |_| {
+        let mut result = fullslice[i];
+        // backslash is a single ascii character, so it can be detected as a u8
+        if result == b'\\' {
+            i += 1;
+            result = fullslice[i];
+            // backslash followed by a backslash is a single ascii character to skip over, so we
+            // won't detect it on the next iteration (we don't process any more complex escapes)
+        }
+        i += 1;
+        result
+    });
+    debug_assert!(i == fullslice.len());
+    // from_utf8_unchecked does not seem to improve perf much, even though it would be
+    // theoretically safe to do so
+    Ok(str::from_utf8(result).unwrap())
 }
 
-fn parse_number<'a, T: FromStr>(iter: &mut Chars<'a>) -> Result<T, InnerParseError<'a>>
+fn parse_number<'a, T: FromStr>(iter: &mut Chars<'a>) -> Result<T, InnerParseError<'a, 'static>>
 where
     <T as FromStr>::Err: Debug,
 {
@@ -1226,7 +1262,7 @@ where
 fn parse_number_after_digit<'a, T: FromStr>(
     start: &'a str,
     iter: &mut Chars<'a>,
-) -> Result<T, InnerParseError<'a>>
+) -> Result<T, InnerParseError<'a, 'static>>
 where
     <T as FromStr>::Err: Debug,
 {
@@ -1244,7 +1280,7 @@ where
     T::from_str(slice).map_err(|_| InnerParseError::InvalidNumber(slice))
 }
 
-fn expect<'a>(iter: &mut Chars<'a>, ch: char) -> Result<(), InnerParseError<'a>> {
+fn expect<'a>(iter: &mut Chars<'a>, ch: char) -> Result<(), InnerParseError<'a, 'static>> {
     if let Some(got) = iter.next() {
         if got == ch {
             Ok(())
@@ -1252,6 +1288,6 @@ fn expect<'a>(iter: &mut Chars<'a>, ch: char) -> Result<(), InnerParseError<'a>>
             Err(InnerParseError::UnexpectedCharSingle(ch, got))
         }
     } else {
-        Err(InnerParseError::UnexpectedEof("number"))
+        Err(InnerParseError::UnexpectedCharSingle(ch, '\0'))
     }
 }

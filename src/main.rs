@@ -7,7 +7,6 @@ use eframe::{
     },
 };
 use std::{
-    collections::HashMap,
     error::Error,
     fmt::{self, Debug, Display, Formatter},
     fs::File,
@@ -21,7 +20,6 @@ use std::{
     },
     time::Instant,
 };
-use yoke::Yoke;
 
 #[allow(dead_code)]
 mod alacritty {
@@ -60,7 +58,7 @@ mod alacritty {
 const HLSEARCH: Color32 = Color32::from_rgb(0, 0x5c, 0x80);
 
 const SPAN: Color32 = alacritty::YELLOW;
-const SPAN_KEYS: Color32 = alacritty::DIM_WHITE;
+const SPAN_KEYS: Color32 = alacritty::YELLOW;
 const FIELD_KEYS: Color32 = alacritty::DIM_WHITE;
 const FIELD_VALUES: Color32 = alacritty::WHITE;
 const TARGET: Color32 = alacritty::CYAN;
@@ -170,12 +168,12 @@ impl AppState {
         }
     }
 
-    fn vdict_matches_search(&self, list: &[HashMap<&str, JsonValue>]) -> bool {
+    fn vdict_matches_search(&self, list: &LinkedList<Span>) -> bool {
         if self.search.is_empty() {
             false
         } else {
             list.iter()
-                .any(|map| dict_matches_search(map, &self.search))
+                .any(|map| span_matches_search(map, &self.search))
         }
     }
 }
@@ -500,35 +498,19 @@ enum FilterKind {
 impl FilterKind {
     fn run(&self, message: &Message, mut visit: impl FnMut(&str) -> bool) -> bool {
         match self {
-            Self::Timestamp => visit(message.parsed().timestamp),
-            Self::Level => visit(message.parsed().level),
-            Self::Fields => message.parsed().fields.iter().any(|(k, v)| {
-                visit(k);
-                if let JsonValue::String(v) = v {
-                    visit(v)
-                } else {
-                    false
-                }
-            }),
-            Self::Target => visit(message.parsed().target),
-            Self::Filename => visit(message.parsed().filename),
-            Self::LineNumber => visit(message.parsed().line_number),
-            Self::SpanName => message.parsed().span.get("name").is_some_and(|n| {
-                if let JsonValue::String(n) = n {
-                    visit(n)
-                } else {
-                    false
-                }
-            }),
-            Self::Spans => message.parsed().spans.iter().any(|n| {
-                n.iter().any(|(k, v)| {
-                    visit(k);
-                    if let JsonValue::String(v) = v {
-                        visit(v)
-                    } else {
-                        false
-                    }
-                })
+            Self::Timestamp => visit(message.parsed.timestamp),
+            Self::Level => visit(message.parsed.level),
+            Self::Fields => message
+                .parsed
+                .fields
+                .iter()
+                .any(|(k, v)| visit(k) || visit(v)),
+            Self::Target => visit(message.parsed.target),
+            Self::Filename => visit(message.parsed.filename),
+            Self::LineNumber => visit(message.parsed.line_number),
+            Self::SpanName => message.parsed.span.name.is_some_and(visit),
+            Self::Spans => message.parsed.spans.iter().any(|n| {
+                n.name.is_some_and(&mut visit) || n.map.iter().any(|(k, v)| visit(k) || visit(v))
             }),
         }
     }
@@ -610,10 +592,14 @@ fn text_format_color(color: Color32) -> TextFormat {
 
 struct Message<'b> {
     parsed: ParsedMessage<'b>,
+    // Box, to keep the size of the struct down
+    logparsed_message: Option<Box<Result<Vec<logparse::Span<'b>>, String>>>,
     parent: Option<usize>,
     indent: usize,
     state: MessageState,
 }
+
+const _: [(); std::mem::size_of::<usize>() * 20] = [(); std::mem::size_of::<Message>()];
 
 #[derive(Default)]
 struct MessageState {
@@ -642,14 +628,11 @@ impl<'b> Message<'b> {
 
         Ok(Self {
             parsed,
+            logparsed_message: None,
             parent,
             indent: self_indent,
             state: Default::default(),
         })
-    }
-
-    fn parsed(&self) -> &ParsedMessage<'b> {
-        &self.parsed
     }
 
     fn is_displayed(&self, messages: &[Message], app_state: &AppState) -> bool {
@@ -687,17 +670,16 @@ impl<'b> Message<'b> {
             app_state,
             found_search: false,
         };
-        let parsed = self.parsed();
         self.main_text(&mut job);
         if self.state.display_filename
             || !job.found_search
-                && (job.app_state.matches_search(parsed.filename)
-                    || job.app_state.matches_search(parsed.line_number))
+                && (job.app_state.matches_search(self.parsed.filename)
+                    || job.app_state.matches_search(self.parsed.line_number))
         {
             self.filename(&mut job);
         }
         if self.state.display_spans
-            || !job.found_search && job.app_state.vdict_matches_search(&parsed.spans)
+            || !job.found_search && job.app_state.vdict_matches_search(self.parsed.spans)
         {
             self.spans(&mut job);
         }
@@ -718,19 +700,20 @@ impl<'b> Message<'b> {
             app_state.search_onscreen = true;
         }
         rsp.context_menu(|ui| {
-            if let Some(HopMessageKind::Enter) = self.parsed().hop_message() {
+            if let Some(HopMessageKind::Enter) = self.parsed.hop_message() {
                 ui.checkbox(&mut self.state.hide_children, "hide children");
             } else if let Some(parent) = parent {
                 ui.checkbox(&mut parent.state.hide_children, "hide siblings");
             }
             ui.checkbox(&mut self.state.display_filename, "filename");
-            if !self.parsed().spans.is_empty() {
+            if let LinkedList::Empty = self.parsed.spans {
+            } else {
                 ui.checkbox(&mut self.state.display_spans, "spans");
             }
             if ui.button("exclude target filter").clicked() {
                 app_state.filters.push(Filter {
                     kind: FilterKind::Target,
-                    filter: self.parsed().target.to_string(),
+                    filter: self.parsed.target.to_string(),
                     exclude: true,
                 });
             }
@@ -738,17 +721,20 @@ impl<'b> Message<'b> {
     }
 
     fn logparse_single_message(&mut self) {
-        let parsed = &mut self.parsed;
-        if parsed.fields.len() == 1
-            && let Some(message) = parsed.fields.get_mut("message")
+        if self.logparsed_message.is_none()
+            && let JsonMap::Cons {
+                next: JsonMap::Empty,
+                item: ("message", message),
+            } = &self.parsed.fields
         {
-            message.logparse();
+            self.logparsed_message = Some(Box::new(
+                logparse::parse_input(message).map(|v| logparse::into_spans(v, LOGPARSE_CONFIG)),
+            ));
         }
     }
 
     fn main_text(&self, job: &mut StrBuilder) {
-        let barsed = self.parsed();
-        if let Some(hop) = barsed.hop_message() {
+        if let Some(hop) = self.parsed.hop_message() {
             let text = match hop {
                 HopMessageKind::Enter => {
                     if self.state.hide_children {
@@ -762,30 +748,34 @@ impl<'b> Message<'b> {
             job.append(text, 0.0, text_format_color(SPAN));
         }
 
-        if job.app_state.timestamps || job.app_state.matches_search(barsed.timestamp) {
-            job.append(barsed.timestamp, 0.0, text_format_color(TIMESTAMP));
+        if job.app_state.timestamps || job.app_state.matches_search(self.parsed.timestamp) {
+            job.append(self.parsed.timestamp, 0.0, text_format_color(TIMESTAMP));
             job.append(" ", 0.0, text_format());
         }
-        if job.app_state.log_levels || job.app_state.matches_search(barsed.level) {
-            let color = log_level_color(barsed.level);
-            job.append(barsed.level, 0.0, text_format_color(color));
+        if job.app_state.log_levels || job.app_state.matches_search(self.parsed.level) {
+            let color = log_level_color(self.parsed.level);
+            job.append(self.parsed.level, 0.0, text_format_color(color));
             job.append(" ", 0.0, text_format());
         }
-        let target_displayed = job.app_state.targets || job.app_state.matches_search(barsed.target);
+        let target_displayed =
+            job.app_state.targets || job.app_state.matches_search(self.parsed.target);
         if target_displayed {
-            job.append(barsed.target, 0.0, text_format_color(TARGET));
+            job.append(self.parsed.target, 0.0, text_format_color(TARGET));
         }
-        if let Some(JsonValue::String(name)) = barsed.span.get("name") {
+        if let Some(name) = self.parsed.span.name {
             if target_displayed {
                 job.append("::", 0.0, text_format_color(COLON_COLON));
             }
             job.append(name, 0.0, text_format_color(SPAN_NAME));
         } else if !target_displayed {
             // TODO: DRY
-            job.append(barsed.target, 0.0, text_format_color(TARGET));
+            job.append(self.parsed.target, 0.0, text_format_color(TARGET));
         }
-        if barsed.fields.len() == 1
-            && let Some(hop) = barsed.hop_message()
+        if let JsonMap::Cons {
+            next: JsonMap::Empty,
+            ..
+        } = &self.parsed.fields
+            && let Some(hop) = self.parsed.hop_message()
         {
             let text = match hop {
                 HopMessageKind::Enter => {
@@ -799,93 +789,91 @@ impl<'b> Message<'b> {
             };
             job.append(text, 0.0, text_format_color(SPAN));
             // enter/exit messages get span
-            self.dict(job, INDENT * 2.0, SPAN, &barsed.span);
+            self.dict(job, INDENT * 2.0, SPAN_KEYS, self.parsed.span.map);
         } else {
-            self.dict(job, INDENT, FIELD_KEYS, &barsed.fields);
+            if let Some(logparsed) = self.logparsed_message.as_deref() {
+                job.append(" ", 0.0, text_format());
+                match logparsed {
+                    Ok(parsed) => {
+                        for span in parsed {
+                            let fmt = text_format_color(logparse_color(span.kind));
+                            job.append(&span.text, 0.0, fmt);
+                        }
+                        return;
+                    }
+                    Err(err) => job.append(err, 0.0, text_format_color(LOGPARSE_ERROR)),
+                }
+            }
+
+            // common case
+            if let JsonMap::Cons {
+                next: JsonMap::Empty,
+                item: ("message", value),
+            } = &self.parsed.fields
+            {
+                job.append(" ", 0.0, text_format());
+                job.append(value, 0.0, text_format_color(FIELD_VALUES));
+                return;
+            }
+
+            self.dict(job, INDENT, FIELD_KEYS, self.parsed.fields);
         }
     }
 
     fn filename(&self, job: &mut StrBuilder) {
-        let parsed = self.parsed();
         job.append("\n", 0.0, text_format());
-        job.append(parsed.filename, INDENT, text_format_color(FILENAME));
+        job.append(self.parsed.filename, INDENT, text_format_color(FILENAME));
         job.append(":", 0.0, text_format_color(FILENAME));
-        job.append(parsed.line_number, 0.0, text_format_color(FILENAME));
+        job.append(self.parsed.line_number, 0.0, text_format_color(FILENAME));
     }
 
     fn spans(&self, job: &mut StrBuilder) {
-        // spans are reversed from the normal stack trace
-        for span in self.parsed().spans.iter().rev() {
+        for span in self.parsed.spans.iter() {
             job.append("\n", 0.0, text_format());
-            let name = match span.get("name") {
-                Some(JsonValue::String(name)) => name,
-                _ => "---",
-            };
+            let name = span.name.unwrap_or("---");
             job.append(name, INDENT, text_format_color(SPAN_NAME));
-            self.dict(job, INDENT * 2.0, SPAN_KEYS, span)
+            self.dict(job, INDENT * 2.0, SPAN_KEYS, span.map)
         }
     }
 
-    fn dict(
-        &self,
-        job: &mut StrBuilder,
-        mut indent: f32,
-        key_color: Color32,
-        map: &HashMap<&str, JsonValue>,
-    ) {
-        // common case
-        if map.len() == 1
-            && let Some(message) = map.get("message")
-        {
-            job.append(" ", 0.0, text_format());
-            message.format(job);
-            return;
-        }
-
-        let total: usize = map
-            .iter()
-            .map(|(k, v)| {
-                k.len()
-                    + match v {
-                        JsonValue::String(s) => s.len(),
-                        JsonValue::Logparsed(s) => s.backing_cart().len(),
-                    }
-            })
-            .sum();
+    fn dict(&self, job: &mut StrBuilder, mut indent: f32, key_color: Color32, map: &JsonMap) {
+        let total: usize = map.iter().map(|(k, v)| k.len() + v.len()).sum();
         let sep = if total > 100 {
             "\n"
         } else {
             indent = 0.0;
             " "
         };
-        for (key, value) in map {
+        for (key, value) in map.iter() {
             job.append(sep, 0.0, text_format());
             job.append(key, indent, text_format_color(key_color));
             job.append(": ", 0.0, text_format_color(key_color));
-            value.format(job);
+            job.append(value, 0.0, text_format_color(FIELD_VALUES));
         }
     }
 
     fn matches_search(&self, search: &str) -> bool {
-        let parsed = self.parsed();
-        parsed.timestamp.contains(search)
-            || parsed.target.contains(search)
-            || parsed.filename.contains(search)
-            || parsed.line_number.contains(search)
-            || dict_matches_search(&parsed.fields, search)
-            || dict_matches_search(&parsed.span, search)
-            || parsed.spans.iter().any(|m| dict_matches_search(m, search))
+        self.parsed.timestamp.contains(search)
+            || self.parsed.target.contains(search)
+            || self.parsed.filename.contains(search)
+            || self.parsed.line_number.contains(search)
+            || dict_matches_search(self.parsed.fields, search)
+            || span_matches_search(&self.parsed.span, search)
+            || self
+                .parsed
+                .spans
+                .iter()
+                .any(|m| span_matches_search(m, search))
     }
 }
 
-fn dict_matches_search(map: &HashMap<&str, JsonValue>, search: &str) -> bool {
-    map.iter().any(|(k, v)| {
-        k.contains(search)
-            || match v {
-                JsonValue::String(s) => s.contains(search),
-                JsonValue::Logparsed(logparsed) => logparsed.backing_cart().contains(search),
-            }
-    })
+fn span_matches_search(map: &Span, search: &str) -> bool {
+    map.name.is_some_and(|n| n.contains(search)) || dict_matches_search(map.map, search)
+}
+
+fn dict_matches_search(map: &JsonMap, search: &str) -> bool {
+    map.iter()
+        .any(|(k, v)| k.contains(search) || v.contains(search))
 }
 
 #[derive(PartialEq, Eq)]
@@ -927,90 +915,78 @@ impl StrBuilder<'_> {
     }
 }
 
-#[derive(Default, yoke::Yokeable)]
+#[derive(Default)]
 struct ParsedMessage<'b> {
     timestamp: &'b str,
     level: &'b str,
-    fields: HashMap<&'b str, JsonValue<'b>>,
+    fields: &'b JsonMap<'b>,
     target: &'b str,
     filename: &'b str,
     line_number: &'b str,
-    span: HashMap<&'b str, JsonValue<'b>>,
-    spans: Vec<HashMap<&'b str, JsonValue<'b>>>,
+    span: Span<'b>,
+    spans: &'b LinkedList<'b, Span<'b>>,
 }
 
 impl<'b> ParsedMessage<'b> {
     fn hop_message(&self) -> Option<HopMessageKind> {
-        self.fields.get("message").and_then(|v| {
-            let v: &str = match v {
-                JsonValue::String(v) => v,
-                JsonValue::Logparsed(v) => v.backing_cart(),
-            };
-            match v {
+        if let JsonMap::Cons {
+            next: JsonMap::Empty,
+            item: ("message", value),
+        } = *self.fields
+        {
+            match value {
                 "enter" => Some(HopMessageKind::Enter),
                 "exit" => Some(HopMessageKind::Exit),
                 _ => None,
             }
-        })
-    }
-}
-
-enum JsonValue<'b> {
-    String(&'b str),
-    // wrap in box to ensure enum stays 16 bytes
-    Logparsed(Box<Yoke<LogparsyYoke<'static>, &'b str>>),
-}
-
-const _: [(); std::mem::size_of::<usize>() * 2] = [(); std::mem::size_of::<JsonValue>()];
-
-#[derive(yoke::Yokeable)]
-struct LogparsyYoke<'a>(Result<Vec<logparse::Span<'a>>, String>);
-
-impl<'b> JsonValue<'b> {
-    fn logparse(&mut self) {
-        let slf = std::mem::replace(self, JsonValue::String(""));
-        *self = slf.logparse_self();
-    }
-
-    fn logparse_self(self) -> Self {
-        if let Self::String(msg) = self {
-            let yoke = Yoke::attach_to_cart(msg, |l| {
-                LogparsyYoke(
-                    logparse::parse_input(l).map(|v| logparse::into_spans(v, LOGPARSE_CONFIG)),
-                )
-            });
-            Self::Logparsed(Box::new(yoke))
         } else {
-            self
+            None
         }
     }
+}
 
-    fn format(&self, job: &mut StrBuilder) {
-        let value = match self {
-            JsonValue::String(cow) => &**cow,
-            JsonValue::Logparsed(logparsed) => {
-                let parsed = logparsed.get();
-                match parsed {
-                    LogparsyYoke(Ok(parsed)) => {
-                        for span in parsed {
-                            let fmt = text_format_color(logparse_color(span.kind));
-                            job.append(&span.text, 0.0, fmt);
-                        }
-                    }
-                    LogparsyYoke(Err(err)) => {
-                        job.append(err, 0.0, text_format_color(LOGPARSE_ERROR));
-                        job.append(" ", 0.0, text_format_color(LOGPARSE_ERROR));
-                        job.append(
-                            logparsed.backing_cart(),
-                            0.0,
-                            text_format_color(FIELD_VALUES),
-                        );
-                    }
-                }
-                return;
+#[derive(Default)]
+struct Span<'b> {
+    name: Option<&'b str>,
+    map: &'b JsonMap<'b>,
+}
+
+enum LinkedList<'b, T> {
+    Empty,
+    Cons {
+        next: &'b LinkedList<'b, T>,
+        item: T,
+    },
+}
+
+type JsonMap<'b> = LinkedList<'b, (&'b str, &'b str)>;
+
+impl<'b, T> LinkedList<'b, T> {
+    fn iter(&'b self) -> LinkedListIter<'b, T> {
+        LinkedListIter { entry: self }
+    }
+}
+
+impl<'b, T> Default for &'b LinkedList<'b, T> {
+    fn default() -> Self {
+        &LinkedList::Empty
+    }
+}
+
+struct LinkedListIter<'b, T> {
+    entry: &'b LinkedList<'b, T>,
+}
+
+impl<'b, T> Iterator for LinkedListIter<'b, T> {
+    type Item = &'b T;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.entry {
+            LinkedList::Empty => None,
+            LinkedList::Cons { next, item } => {
+                self.entry = *next;
+                Some(item)
             }
-        };
-        job.append(value, 0.0, text_format_color(FIELD_VALUES));
+        }
     }
 }
 
@@ -1078,12 +1054,12 @@ fn custom_parse2<'a, 'b>(
         match key {
             "timestamp" => result.timestamp = parse_string(bump, iter)?,
             "level" => result.level = parse_string(bump, iter)?,
-            "fields" => parse_dict(bump, iter, &mut result.fields)?,
+            "fields" => parse_dict(bump, iter, &mut result.fields, |_, _| false)?,
             "target" => result.target = parse_string(bump, iter)?,
             "filename" => result.filename = parse_string(bump, iter)?,
             "line_number" => result.line_number = parse_number(bump, iter)?,
-            "span" => parse_dict(bump, iter, &mut result.span)?,
-            "spans" => parse_dicts(bump, iter, &mut result.spans)?,
+            "span" => parse_span(bump, iter, &mut result.span)?,
+            "spans" => parse_spans(bump, iter, &mut result.spans)?,
             _ => break Err(InnerParseError::UnknownField(key)),
         }
         match iter
@@ -1097,10 +1073,10 @@ fn custom_parse2<'a, 'b>(
     }
 }
 
-fn parse_dicts<'a, 'b>(
+fn parse_spans<'a, 'b>(
     bump: &'b Bump,
     iter: &mut Chars<'a>,
-    result: &mut Vec<HashMap<&'b str, JsonValue<'b>>>,
+    result: &mut &'b LinkedList<'b, Span<'b>>,
 ) -> Result<(), InnerParseError<'b>> {
     expect(iter, '[')?;
     let mut iter_clone = iter.clone();
@@ -1110,8 +1086,12 @@ fn parse_dicts<'a, 'b>(
     }
     loop {
         let mut single = Default::default();
-        parse_dict(bump, iter, &mut single)?;
-        result.push(single);
+        parse_span(bump, iter, &mut single)?;
+        let cons = LinkedList::Cons {
+            next: result,
+            item: single,
+        };
+        *result = bump.alloc(cons);
         match iter
             .next()
             .ok_or(InnerParseError::UnexpectedEof("dict array"))?
@@ -1123,10 +1103,26 @@ fn parse_dicts<'a, 'b>(
     }
 }
 
+fn parse_span<'a, 'b>(
+    bump: &'b Bump,
+    iter: &mut Chars<'a>,
+    result: &mut Span<'b>,
+) -> Result<(), InnerParseError<'b>> {
+    parse_dict(bump, iter, &mut result.map, |key, value| {
+        if key == "name" {
+            result.name = Some(value);
+            true
+        } else {
+            false
+        }
+    })
+}
+
 fn parse_dict<'a, 'b>(
     bump: &'b Bump,
     iter: &mut Chars<'a>,
-    result: &mut HashMap<&'b str, JsonValue<'b>>,
+    result: &mut &'b JsonMap<'b>,
+    mut on_key_value: impl FnMut(&'b str, &'b str) -> bool,
 ) -> Result<(), InnerParseError<'b>> {
     expect(iter, '{')?;
     loop {
@@ -1154,7 +1150,13 @@ fn parse_dict<'a, 'b>(
             ch if ch.is_ascii_digit() => parse_number_after_digit(bump, start, iter)?,
             ch => break Err(InnerParseError::UnexpectedChar(&['"', 't', 'f', '0'], ch)),
         };
-        result.insert(key, JsonValue::String(value));
+        if !on_key_value(key, value) {
+            let cons = JsonMap::Cons {
+                next: result,
+                item: (key, value),
+            };
+            *result = bump.alloc(cons);
+        }
         match iter.next().ok_or(InnerParseError::UnexpectedEof("dict"))? {
             '}' => break Ok(()),
             ',' => continue,

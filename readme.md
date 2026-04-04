@@ -53,7 +53,7 @@ Once the app is running, uuuh, it's a bit of a WIP mess right now, there's vague
 # I need to apologize
 
 I handrolled my own json parser for this (sorry...). That means that if you try to use this, it might be kinda brittle.
-The reason I did so is because the handrolled version is ~7x faster than facet\_json, which is the difference between
-waiting 14 seconds and waiting 2 seconds to parse a 1.5GiB file (typical for RUSTC\_LOG=trace on a basic ui test). The
+The reason I did so is because the handrolled version is ~9x faster than facet\_json, which is the difference between
+waiting 14 seconds and waiting 1.5 seconds to parse a 1.5GiB file (typical for RUSTC\_LOG=trace on a basic ui test). The
 custom parser mostly assumes the input is well-formed, it doesn't do sanity checks like duplicate field detection.
 Hopefully, if the format changes, it's relatively easy to patch up the parser!

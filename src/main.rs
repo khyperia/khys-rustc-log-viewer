@@ -670,31 +670,19 @@ impl<'b> Message<'b> {
             app_state,
             found_search: false,
         };
-        self.main_text(&mut job);
-        if self.state.display_filename
-            || !job.found_search
-                && (job.app_state.matches_search(self.parsed.filename)
-                    || job.app_state.matches_search(self.parsed.line_number))
-        {
-            self.filename(&mut job);
-        }
-        if self.state.display_spans
-            || !job.found_search && job.app_state.vdict_matches_search(self.parsed.spans)
-        {
-            self.spans(&mut job);
-        }
+        self.build_text(&mut job);
         let rsp = if !job.found_search
-            && !job.app_state.search.is_empty()
-            && self.matches_search(&job.app_state.search)
+            && !app_state.search.is_empty()
+            && self.matches_search(&app_state.search)
         {
             job.found_search = true;
             // fallback to highlight the whole message if we're not displaying the matching text
             Frame::NONE
                 .fill(HLSEARCH)
-                .show(ui, |ui| ui.label(job.job))
+                .show(ui, |ui| ui.label(job.job.clone()))
                 .inner
         } else {
-            ui.label(job.job)
+            ui.label(job.job.clone())
         };
         if job.found_search && ui.clip_rect().intersects(rsp.rect) {
             app_state.search_onscreen = true;
@@ -733,7 +721,7 @@ impl<'b> Message<'b> {
         }
     }
 
-    fn main_text(&self, job: &mut StrBuilder) {
+    fn build_text(&self, job: &mut StrBuilder) {
         if let Some(hop) = self.parsed.hop_message() {
             let text = match hop {
                 HopMessageKind::Enter => {
@@ -771,6 +759,22 @@ impl<'b> Message<'b> {
             // TODO: DRY
             job.append(self.parsed.target, 0.0, text_format_color(TARGET));
         }
+        self.fields(job);
+        if self.state.display_filename
+            || !job.found_search
+                && (job.app_state.matches_search(self.parsed.filename)
+                    || job.app_state.matches_search(self.parsed.line_number))
+        {
+            self.filename(job);
+        }
+        if self.state.display_spans
+            || !job.found_search && job.app_state.vdict_matches_search(self.parsed.spans)
+        {
+            self.spans(job);
+        }
+    }
+
+    fn fields(&self, job: &mut StrBuilder) {
         if let JsonMap::Cons {
             next: JsonMap::Empty,
             ..
@@ -884,7 +888,7 @@ enum HopMessageKind {
 
 struct StrBuilder<'a> {
     job: LayoutJob,
-    app_state: &'a mut AppState,
+    app_state: &'a AppState,
     found_search: bool,
 }
 

@@ -1,6 +1,6 @@
 use bumpalo::Bump;
 use eframe::{
-    CreationContext,
+    CreationContext, NativeOptions,
     egui::{
         CentralPanel, Color32, ComboBox, FontId, Frame, InputState, Key, Modifiers, Panel,
         TextFormat, Ui, UiBuilder, text::LayoutJob,
@@ -80,17 +80,16 @@ fn log_level_color(level: &str) -> Color32 {
 
 fn logparse_color(kind: logparse::SpanKind) -> Color32 {
     match kind {
-        logparse::SpanKind::Delimiter(_) => alacritty::WHITE,
-        logparse::SpanKind::Separator => alacritty::DIM_WHITE,
-        logparse::SpanKind::Number => alacritty::CYAN,
-        logparse::SpanKind::Literal => alacritty::CYAN,
-        logparse::SpanKind::Lifetime => alacritty::CYAN,
+        logparse::SpanKind::Number | logparse::SpanKind::Literal | logparse::SpanKind::Lifetime => {
+            alacritty::CYAN
+        }
         logparse::SpanKind::String => alacritty::YELLOW,
-        logparse::SpanKind::Path => alacritty::DIM_WHITE,
-        logparse::SpanKind::Space(_) => alacritty::WHITE,
         logparse::SpanKind::Constructor => alacritty::BLUE,
         logparse::SpanKind::Surroundings => alacritty::DIM_CYAN,
-        logparse::SpanKind::Text => alacritty::WHITE,
+        logparse::SpanKind::Separator | logparse::SpanKind::Path => alacritty::DIM_WHITE,
+        logparse::SpanKind::Delimiter(_)
+        | logparse::SpanKind::Space(_)
+        | logparse::SpanKind::Text => alacritty::WHITE,
     }
 }
 
@@ -124,7 +123,7 @@ fn main() -> anyhow::Result<()> {
     std::thread::scope(|scope| {
         eframe::run_native(
             "Khy's rustc log viewer",
-            Default::default(),
+            NativeOptions::default(),
             Box::new(|cc| Ok(Box::new(App::new(cc, &mut bump, scope, path)))),
         )
     })?;
@@ -164,7 +163,7 @@ impl AppState {
             targets: true,
             filters,
             filter_save_result,
-            ..Default::default()
+            ..Self::default()
         }
     }
 
@@ -210,7 +209,7 @@ impl<'b> App<'b> {
             ui_has_been_notified,
             start_time: Instant::now(),
             end_time: None,
-            scroll_value: Default::default(),
+            scroll_value: ScrollValue::default(),
             state: AppState::new(),
         }
     }
@@ -236,7 +235,7 @@ impl<'b> App<'b> {
     }
 }
 
-impl<'b> eframe::App for App<'b> {
+impl eframe::App for App<'_> {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.ui_has_been_notified.store(false, Ordering::Relaxed);
         loop {
@@ -334,12 +333,12 @@ impl<'b> eframe::App for App<'b> {
             });
             ui.horizontal(|ui| {
                 if ui.button("add filter").clicked() {
-                    self.state.filters.push(Filter::new())
+                    self.state.filters.push(Filter::new());
                 }
                 if ui.button("save filters as default").clicked() {
                     self.state.filter_save_result = match Filter::to_file(&self.state.filters) {
                         Ok(()) => String::new(),
-                        Err(e) => e.to_string(),
+                        Err(e) => e,
                     };
                 }
                 if !self.state.filter_save_result.is_empty() {
@@ -511,13 +510,13 @@ impl Filter {
                 Ok(()) => (),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
                 Err(e) => return Err(e.to_string()),
-            };
+            }
             if let Some(parent) = config_path.parent() {
                 match std::fs::remove_dir(parent) {
                     Ok(()) => (),
                     Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => (),
                     Err(e) => return Err(e.to_string()),
-                };
+                }
             }
             Ok(())
         } else {
@@ -573,7 +572,7 @@ enum FilterKind {
 }
 
 impl FilterKind {
-    fn run(&self, message: &Message, mut visit: impl FnMut(&str) -> bool) -> bool {
+    fn run(self, message: &Message, mut visit: impl FnMut(&str) -> bool) -> bool {
         match self {
             Self::Timestamp => visit(message.parsed.timestamp),
             Self::Level => visit(message.parsed.level),
@@ -592,7 +591,7 @@ impl FilterKind {
         }
     }
 
-    fn name(&self) -> &'static str {
+    fn name(self) -> &'static str {
         match self {
             Self::Timestamp => "timestamp",
             Self::Level => "level",
@@ -654,7 +653,7 @@ fn read_lines<'b: 'scope, 'scope, 'env>(
 fn text_format() -> TextFormat {
     TextFormat {
         font_id: FontId::monospace(14.0),
-        ..Default::default()
+        ..TextFormat::default()
     }
 }
 
@@ -696,7 +695,7 @@ impl<'b> Message<'b> {
     ) -> anyhow::Result<Self> {
         let parsed = custom_parse(bump, line)?;
         let msg = parsed.hop_message();
-        let parent = parent_stack.last().cloned();
+        let parent = parent_stack.last().copied();
         if msg == Some(HopMessageKind::Exit) {
             parent_stack.pop();
         }
@@ -710,7 +709,7 @@ impl<'b> Message<'b> {
             logparsed_message: None,
             parent,
             indent: self_indent.try_into().unwrap_or(u32::MAX),
-            state: Default::default(),
+            state: MessageState::default(),
         })
     }
 
@@ -897,7 +896,7 @@ impl<'b> Message<'b> {
             };
             job.append(text, 0.0, text_format_color(SPAN));
             // enter/exit messages get span
-            self.dict(job, INDENT * 2.0, SPAN_KEYS, self.parsed.span.map);
+            Self::dict(job, INDENT * 2.0, SPAN_KEYS, self.parsed.span.map);
         } else {
             if let Some(logparsed) = self.logparsed_message.as_deref() {
                 job.append(" ", 0.0, text_format());
@@ -919,7 +918,7 @@ impl<'b> Message<'b> {
                 return;
             }
 
-            self.dict(job, INDENT, FIELD_KEYS, self.parsed.fields);
+            Self::dict(job, INDENT, FIELD_KEYS, self.parsed.fields);
         }
     }
 
@@ -935,11 +934,11 @@ impl<'b> Message<'b> {
             job.append("\n", 0.0, text_format());
             let name = span.name.unwrap_or("---");
             job.append(name, INDENT, text_format_color(SPAN_NAME));
-            self.dict(job, INDENT * 2.0, SPAN_KEYS, span.map)
+            Self::dict(job, INDENT * 2.0, SPAN_KEYS, span.map);
         }
     }
 
-    fn dict(&self, job: &mut StrBuilder, mut indent: f32, key_color: Color32, map: &JsonMap) {
+    fn dict(job: &mut StrBuilder, mut indent: f32, key_color: Color32, map: &JsonMap) {
         let total: usize = map.iter().map(|(k, v)| k.len() + v.len()).sum();
         let sep = if total > 100 {
             "\n"
@@ -1014,7 +1013,7 @@ impl StrBuilder<'_> {
                 self.found_search = true;
             }
         }
-        self.job.append(&text[last_ind..], leading_space, format)
+        self.job.append(&text[last_ind..], leading_space, format);
     }
 }
 
@@ -1030,7 +1029,7 @@ struct ParsedMessage<'b> {
     spans: &'b LinkedList<'b, Span<'b>>,
 }
 
-impl<'b> ParsedMessage<'b> {
+impl ParsedMessage<'_> {
     fn hop_message(&self) -> Option<HopMessageKind> {
         if let JsonMap::Cons {
             next: JsonMap::Empty,
@@ -1100,11 +1099,8 @@ struct ParseError {
 }
 
 impl Display for ParseError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_fmt(format_args!(
-            "parse error: {} -- on line {}",
-            self.message, self.line
-        ))
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "parse error: {} -- on line {}", self.message, self.line)
     }
 }
 
@@ -1113,7 +1109,7 @@ impl Error for ParseError {}
 fn custom_parse<'b>(bump: &'b Bump, s: &str) -> Result<ParsedMessage<'b>, ParseError> {
     custom_parse2(bump, &mut s.chars()).map_err(|inner| ParseError {
         line: s.to_string(),
-        message: format!("{}", inner),
+        message: inner.to_string(),
     })
 }
 
@@ -1125,27 +1121,24 @@ enum InnerParseError<'b> {
 }
 
 impl Display for InnerParseError<'_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
-            Self::UnknownField(field) => f.write_fmt(format_args!("unknown field {}", field)),
-            Self::UnexpectedEof(kind) => {
-                f.write_fmt(format_args!("unexpected eof parsing {}", kind))
+            Self::UnknownField(field) => write!(f, "unknown field {field}"),
+            Self::UnexpectedEof(kind) => write!(f, "unexpected eof parsing {kind}"),
+            Self::UnexpectedChar(expected, got) => write!(
+                f,
+                "unexpected character '{got}' (expected one of {expected:?})"
+            ),
+            Self::UnexpectedCharSingle(expected, got) => {
+                write!(f, "unexpected character '{got}' (expected '{expected}')")
             }
-            Self::UnexpectedChar(expected, got) => f.write_fmt(format_args!(
-                "unexpected character '{}' (expected one of {:?})",
-                got, expected
-            )),
-            Self::UnexpectedCharSingle(expected, got) => f.write_fmt(format_args!(
-                "unexpected character '{}' (expected '{}')",
-                got, expected
-            )),
         }
     }
 }
 
-fn custom_parse2<'a, 'b>(
+fn custom_parse2<'b>(
     bump: &'b Bump,
-    iter: &mut Chars<'a>,
+    iter: &mut Chars,
 ) -> Result<ParsedMessage<'b>, InnerParseError<'b>> {
     let mut result = ParsedMessage::default();
 
@@ -1170,15 +1163,15 @@ fn custom_parse2<'a, 'b>(
             .ok_or(InnerParseError::UnexpectedEof("message"))?
         {
             '}' => break Ok(result),
-            ',' => continue,
+            ',' => (),
             ch => break Err(InnerParseError::UnexpectedChar(&['}', ','], ch)),
         }
     }
 }
 
-fn parse_spans<'a, 'b>(
+fn parse_spans<'b>(
     bump: &'b Bump,
-    iter: &mut Chars<'a>,
+    iter: &mut Chars,
     result: &mut &'b LinkedList<'b, Span<'b>>,
 ) -> Result<(), InnerParseError<'b>> {
     expect(iter, '[')?;
@@ -1188,7 +1181,7 @@ fn parse_spans<'a, 'b>(
         return Ok(());
     }
     loop {
-        let mut single = Default::default();
+        let mut single = Span::default();
         parse_span(bump, iter, &mut single)?;
         let cons = LinkedList::Cons {
             next: result,
@@ -1200,15 +1193,15 @@ fn parse_spans<'a, 'b>(
             .ok_or(InnerParseError::UnexpectedEof("dict array"))?
         {
             ']' => break Ok(()),
-            ',' => continue,
+            ',' => (),
             ch => break Err(InnerParseError::UnexpectedChar(&[']', ','], ch)),
         }
     }
 }
 
-fn parse_span<'a, 'b>(
+fn parse_span<'b>(
     bump: &'b Bump,
-    iter: &mut Chars<'a>,
+    iter: &mut Chars,
     result: &mut Span<'b>,
 ) -> Result<(), InnerParseError<'b>> {
     parse_dict(bump, iter, &mut result.map, |key, value| {
@@ -1221,9 +1214,9 @@ fn parse_span<'a, 'b>(
     })
 }
 
-fn parse_dict<'a, 'b>(
+fn parse_dict<'b>(
     bump: &'b Bump,
-    iter: &mut Chars<'a>,
+    iter: &mut Chars,
     result: &mut &'b JsonMap<'b>,
     mut on_key_value: impl FnMut(&'b str, &'b str) -> bool,
 ) -> Result<(), InnerParseError<'b>> {
@@ -1250,7 +1243,7 @@ fn parse_dict<'a, 'b>(
                 expect(iter, 'e')?;
                 "false"
             }
-            ch if ch.is_ascii_digit() => parse_number_after_digit(bump, start, iter)?,
+            ch if ch.is_ascii_digit() => parse_number_after_digit(bump, start, iter),
             ch => break Err(InnerParseError::UnexpectedChar(&['"', 't', 'f', '0'], ch)),
         };
         if !on_key_value(key, value) {
@@ -1262,23 +1255,20 @@ fn parse_dict<'a, 'b>(
         }
         match iter.next().ok_or(InnerParseError::UnexpectedEof("dict"))? {
             '}' => break Ok(()),
-            ',' => continue,
+            ',' => (),
             ch => break Err(InnerParseError::UnexpectedChar(&['}', ','], ch)),
         }
     }
 }
 
-fn parse_string<'a, 'b>(
-    bump: &'b Bump,
-    iter: &mut Chars<'a>,
-) -> Result<&'b str, InnerParseError<'b>> {
+fn parse_string<'b>(bump: &'b Bump, iter: &mut Chars) -> Result<&'b str, InnerParseError<'b>> {
     expect(iter, '"')?;
     parse_string_after_quote(bump, iter)
 }
 
-fn parse_string_after_quote<'a, 'b>(
+fn parse_string_after_quote<'b>(
     bump: &'b Bump,
-    iter: &mut Chars<'a>,
+    iter: &mut Chars,
 ) -> Result<&'b str, InnerParseError<'b>> {
     let str_begin = iter.as_str();
     let mut backslash_count = 0;
@@ -1303,11 +1293,10 @@ fn parse_string_after_quote<'a, 'b>(
                 // There are no backslashes. Use a direct bumpalo alloc_str to copy the data into
                 // bumpalo.
                 return Ok(bump.alloc_str(&str_begin[..index]));
-            } else {
-                // There are backslashes. Do a custom alloc_slice_fill_with to skip over the
-                // backslashes while copying.
-                break index;
             }
+            // There are backslashes. Do a custom alloc_slice_fill_with to skip over the
+            // backslashes while copying.
+            break index;
         }
     };
 
@@ -1333,26 +1322,19 @@ fn parse_string_after_quote<'a, 'b>(
     Ok(str::from_utf8(result).unwrap())
 }
 
-fn parse_number<'a, 'b>(
-    bump: &'b Bump,
-    iter: &mut Chars<'a>,
-) -> Result<&'b str, InnerParseError<'static>> {
+fn parse_number<'b>(bump: &'b Bump, iter: &mut Chars) -> Result<&'b str, InnerParseError<'static>> {
     let start = iter.as_str();
     let ch = iter
         .next()
         .ok_or(InnerParseError::UnexpectedEof("number"))?;
     if ch.is_ascii_digit() {
-        parse_number_after_digit(bump, start, iter)
+        Ok(parse_number_after_digit(bump, start, iter))
     } else {
         Err(InnerParseError::UnexpectedChar(&['0'], ch))
     }
 }
 
-fn parse_number_after_digit<'a, 'b>(
-    bump: &'b Bump,
-    start: &'a str,
-    iter: &mut Chars<'a>,
-) -> Result<&'b str, InnerParseError<'static>> {
+fn parse_number_after_digit<'b>(bump: &'b Bump, start: &str, iter: &mut Chars) -> &'b str {
     let slice = loop {
         let mut cloned = iter.clone();
         let Some(ch) = cloned.next() else {
@@ -1364,10 +1346,10 @@ fn parse_number_after_digit<'a, 'b>(
         }
         *iter = cloned;
     };
-    Ok(bump.alloc_str(slice))
+    bump.alloc_str(slice)
 }
 
-fn expect<'a>(iter: &mut Chars<'a>, ch: char) -> Result<(), InnerParseError<'static>> {
+fn expect(iter: &mut Chars, ch: char) -> Result<(), InnerParseError<'static>> {
     if let Some(got) = iter.next() {
         if got == ch {
             Ok(())

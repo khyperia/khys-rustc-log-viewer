@@ -6,5 +6,8 @@ edition = "2024"
 [dependencies]
 anyhow = "*"
 bumpalo = "*"
+dirs = "*"
 eframe = "*"
 logparse = "*"
+serde = "*"
+serde_json = "*"

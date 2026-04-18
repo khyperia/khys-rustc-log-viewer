@@ -6,11 +6,12 @@ use eframe::{
         TextFormat, Ui, UiBuilder, text::LayoutJob,
     },
 };
+use serde::{Deserialize, Serialize};
 use std::{
     error::Error,
     fmt::{self, Debug, Display, Formatter},
     fs::File,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, BufWriter},
     path::PathBuf,
     str::Chars,
     sync::{
@@ -149,13 +150,20 @@ struct AppState {
     log_levels: bool,
     targets: bool,
     filters: Vec<Filter>,
+    filter_save_result: String,
 }
 
 impl AppState {
     fn new() -> Self {
+        let (filters, filter_save_result) = match Filter::from_file() {
+            Ok(filters) => (filters, String::new()),
+            Err(e) => (vec![], e),
+        };
         Self {
             log_levels: true,
             targets: true,
+            filters,
+            filter_save_result,
             ..Default::default()
         }
     }
@@ -283,6 +291,7 @@ impl<'b> eframe::App for App<'b> {
                 }
             }
         });
+        clamp_scroller(&mut self.scroll_value, self.messages.len());
         let mut ensure_search_onscreen = false;
         if self.state.entering_search_text || !self.state.search.is_empty() {
             Panel::bottom("search panel").show_inside(ui, |ui| {
@@ -323,9 +332,20 @@ impl<'b> eframe::App for App<'b> {
                 id_salt += 1;
                 q.ui(salt, ui)
             });
-            if ui.button("add filter").clicked() {
-                self.state.filters.push(Filter::new())
-            }
+            ui.horizontal(|ui| {
+                if ui.button("add filter").clicked() {
+                    self.state.filters.push(Filter::new())
+                }
+                if ui.button("save filters as default").clicked() {
+                    self.state.filter_save_result = match Filter::to_file(&self.state.filters) {
+                        Ok(()) => String::new(),
+                        Err(e) => e.to_string(),
+                    };
+                }
+                if !self.state.filter_save_result.is_empty() {
+                    ui.label(&self.state.filter_save_result);
+                }
+            });
             ui.add_space(2.0);
         });
         self.state.search_onscreen = false;
@@ -363,6 +383,15 @@ impl<'b> eframe::App for App<'b> {
 struct ScrollValue {
     index: usize,
     pixel_offset: f32,
+}
+
+fn clamp_scroller(value: &mut ScrollValue, len: usize) {
+    if value.index == 0 && value.pixel_offset < 0.0 {
+        value.pixel_offset = 0.0;
+    }
+    if value.index >= len && value.pixel_offset > 0.0 {
+        value.pixel_offset = 0.0;
+    }
 }
 
 fn scroller_mouse_input(input: &mut InputState, value: &mut ScrollValue) {
@@ -416,11 +445,10 @@ fn big_scroller(
             if end > max_rect.bottom() {
                 break;
             }
-            if end < absolute_begin && value.index + 1 < len {
+            if end < absolute_begin && value.index < len {
                 value.index += 1;
                 let size = end - begin;
                 value.pixel_offset -= size;
-                // println!("next scroll: {} {}", value.index, value.pixel_offset);
             }
         }
     });
@@ -439,6 +467,7 @@ fn big_scroller(
     }
 }
 
+#[derive(Serialize, Deserialize)]
 struct Filter {
     kind: FilterKind,
     filter: String,
@@ -451,6 +480,54 @@ impl Filter {
             kind: FilterKind::Target,
             filter: String::new(),
             exclude: true,
+        }
+    }
+
+    fn file() -> Option<PathBuf> {
+        dirs::config_dir().map(|mut v| {
+            v.push("khys-rustc-log-viewer");
+            v.push("filters.json");
+            v
+        })
+    }
+
+    fn from_file() -> Result<Vec<Self>, String> {
+        let config_path = Self::file().ok_or_else(|| "no config dir available".to_string())?;
+        let file = File::open(config_path).map_err(|a| {
+            if a.kind() == std::io::ErrorKind::NotFound {
+                String::new()
+            } else {
+                a.to_string()
+            }
+        })?;
+        let reader = BufReader::new(file);
+        serde_json::from_reader(reader).map_err(|e| e.to_string())
+    }
+
+    fn to_file(v: &[Self]) -> Result<(), String> {
+        let config_path = Self::file().ok_or_else(|| "no config dir available".to_string())?;
+        if v.is_empty() {
+            match std::fs::remove_file(&config_path) {
+                Ok(()) => (),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                Err(e) => return Err(e.to_string()),
+            };
+            if let Some(parent) = config_path.parent() {
+                match std::fs::remove_dir(parent) {
+                    Ok(()) => (),
+                    Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => (),
+                    Err(e) => return Err(e.to_string()),
+                };
+            }
+            Ok(())
+        } else {
+            if let Some(parent) = config_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            let file = File::create(config_path).map_err(|e| e.to_string())?;
+            let writer = BufWriter::new(file);
+            serde_json::to_writer(writer, v).map_err(|e| e.to_string())?;
+            Ok(())
         }
     }
 
@@ -483,7 +560,7 @@ impl Filter {
     }
 }
 
-#[derive(Eq, PartialEq, Clone, Copy)]
+#[derive(Eq, PartialEq, Clone, Copy, Serialize, Deserialize)]
 enum FilterKind {
     Timestamp,
     Level,
@@ -595,11 +672,12 @@ struct Message<'b> {
     // Box, to keep the size of the struct down
     logparsed_message: Option<Box<Result<Vec<logparse::Span<'b>>, String>>>,
     parent: Option<usize>,
-    indent: usize,
+    // can probably be a u8, but it doesn't currently help struct size to make it u8
+    indent: u32,
     state: MessageState,
 }
 
-const _: [(); std::mem::size_of::<usize>() * 20] = [(); std::mem::size_of::<Message>()];
+const _: [(); std::mem::size_of::<usize>() * 19] = [(); std::mem::size_of::<Message>()];
 
 #[derive(Default)]
 struct MessageState {
@@ -630,7 +708,7 @@ impl<'b> Message<'b> {
             parsed,
             logparsed_message: None,
             parent,
-            indent: self_indent,
+            indent: self_indent.try_into().unwrap_or(u32::MAX),
             state: Default::default(),
         })
     }
@@ -702,6 +780,13 @@ impl<'b> Message<'b> {
                 app_state.filters.push(Filter {
                     kind: FilterKind::Target,
                     filter: self.parsed.target.to_string(),
+                    exclude: true,
+                });
+            }
+            if ui.button("exclude target filename").clicked() {
+                app_state.filters.push(Filter {
+                    kind: FilterKind::Filename,
+                    filter: self.parsed.filename.to_string(),
                     exclude: true,
                 });
             }
@@ -1219,9 +1304,11 @@ fn parse_string_after_quote<'a, 'b>(
         // backslash is a single ascii character, so it can be detected as a u8
         if result == b'\\' {
             i += 1;
-            result = fullslice[i];
-            // backslash followed by a backslash is a single ascii character to skip over, so we
-            // won't detect it on the next iteration (we don't process any more complex escapes)
+            result = match fullslice[i] {
+                b'n' => b'\n',
+                b'r' => b'\r',
+                ch => ch,
+            };
         }
         i += 1;
         result

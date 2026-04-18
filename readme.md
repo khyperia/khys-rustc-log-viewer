@@ -23,8 +23,8 @@ Personally, I use this [fish](https://fishshell.com/) function, shoved into `~/.
 
 ```fish
 function viewlog --wraps='rustc +stage1'
-    if test -d $PWD/target/viewlog-output
-        rm -r $PWD/target/viewlog-output
+    if test -d $PWD/build/viewlog-output
+        rm -r $PWD/build/viewlog-output
     end
     if test ! -p /tmp/viewlog
         mkfifo /tmp/viewlog
@@ -35,7 +35,7 @@ function viewlog --wraps='rustc +stage1'
     if ! set -q RUSTC_LOG
         set -fx RUSTC_LOG trace
     end
-    rustc +stage1 --out-dir $PWD/target/viewlog-output $argv
+    rustc +stage1 --out-dir $PWD/build/viewlog-output $argv
 end
 ```
 

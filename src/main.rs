@@ -78,7 +78,6 @@ fn log_level_color(level: &str) -> Color32 {
     }
 }
 
-const LOGPARSE_ERROR: Color32 = alacritty::RED;
 fn logparse_color(kind: logparse::SpanKind) -> Color32 {
     match kind {
         logparse::SpanKind::Delimiter(_) => alacritty::WHITE,
@@ -671,7 +670,8 @@ fn text_format_color(color: Color32) -> TextFormat {
 struct Message<'b> {
     parsed: ParsedMessage<'b>,
     // Box, to keep the size of the struct down
-    logparsed_message: Option<Box<Result<Vec<logparse::Span<'b>>, String>>>,
+    #[allow(clippy::box_collection)]
+    logparsed_message: Option<Box<Vec<logparse::Span<'b>>>>,
     parent: Option<usize>,
     // can probably be a u8, but it doesn't currently help struct size to make it u8
     indent: u32,
@@ -801,9 +801,27 @@ impl<'b> Message<'b> {
                 item: ("message", message),
             } = &self.parsed.fields
         {
-            self.logparsed_message = Some(Box::new(
-                logparse::parse_input(message).map(|v| logparse::into_spans(v, LOGPARSE_CONFIG)),
-            ));
+            self.logparsed_message = Some(Box::new(match logparse::parse_input(message) {
+                Ok(v) => logparse::into_spans(v, LOGPARSE_CONFIG),
+                Err(e) => vec![
+                    logparse::Span {
+                        text: "logparse error(".into(),
+                        kind: logparse::SpanKind::Text,
+                    },
+                    logparse::Span {
+                        text: e.into(),
+                        kind: logparse::SpanKind::Text,
+                    },
+                    logparse::Span {
+                        text: "): ".into(),
+                        kind: logparse::SpanKind::Text,
+                    },
+                    logparse::Span {
+                        text: (*message).into(),
+                        kind: logparse::SpanKind::Text,
+                    },
+                ],
+            }));
         }
     }
 
@@ -883,16 +901,11 @@ impl<'b> Message<'b> {
         } else {
             if let Some(logparsed) = self.logparsed_message.as_deref() {
                 job.append(" ", 0.0, text_format());
-                match logparsed {
-                    Ok(parsed) => {
-                        for span in parsed {
-                            let fmt = text_format_color(logparse_color(span.kind));
-                            job.append(&span.text, 0.0, fmt);
-                        }
-                        return;
-                    }
-                    Err(err) => job.append(err, 0.0, text_format_color(LOGPARSE_ERROR)),
+                for span in logparsed {
+                    let fmt = text_format_color(logparse_color(span.kind));
+                    job.append(&span.text, 0.0, fmt);
                 }
+                return;
             }
 
             // common case

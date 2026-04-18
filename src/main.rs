@@ -99,6 +99,7 @@ const INDENT: f32 = 8.0;
 
 const LOGPARSE_CONFIG: logparse::Config = logparse::Config {
     collapse_space: false,
+    pretty_print: None,
 };
 
 fn main() -> anyhow::Result<()> {

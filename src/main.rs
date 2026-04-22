@@ -12,6 +12,7 @@ use std::{
     fmt::{self, Debug, Display, Formatter},
     fs::File,
     io::{BufRead, BufReader, BufWriter},
+    num::NonZeroUsize,
     path::PathBuf,
     str::Chars,
     sync::{
@@ -73,7 +74,8 @@ fn log_level_color(level: &str) -> Color32 {
         "TRACE" => alacritty::MAGENTA,
         "DEBUG" => alacritty::BLUE,
         "INFO" => alacritty::GREEN,
-        "WARN" => alacritty::YELLOW, // TODO: is WARN the right name for this? (i've never seen it)
+        "WARN" => alacritty::BRIGHT_YELLOW,
+        "ERROR" => alacritty::BRIGHT_RED,
         _ => alacritty::RED,
     }
 }
@@ -136,12 +138,12 @@ struct App<'b> {
     ui_has_been_notified: Arc<AtomicBool>,
     start_time: Instant,
     end_time: Option<Instant>,
-    scroll_value: ScrollValue,
     state: AppState,
 }
 
 #[derive(Default)]
 struct AppState {
+    scroll_value: ScrollValue,
     entering_search_text: bool,
     search: String,
     search_onscreen: bool,
@@ -209,24 +211,27 @@ impl<'b> App<'b> {
             ui_has_been_notified,
             start_time: Instant::now(),
             end_time: None,
-            scroll_value: ScrollValue::default(),
             state: AppState::new(),
         }
     }
 
+    fn recv_message(&mut self, message: Message<'b>) {
+        if message.parsed.hop_message() == Some(HopMessageKind::Exit)
+            && let Some(parent) = message.parent
+        {
+            self.messages[parent].exit = NonZeroUsize::new(self.messages.len());
+        }
+        self.messages.push(message);
+    }
+
     // silly nit: index is *inclusive* here
     fn next_search(&self, index: usize) -> Option<usize> {
-        (index..self.messages.len())
-            .chain(0..index)
-            .find(|&index| self.next_search_raw(index))
+        (index..self.messages.len()).find(|&index| self.next_search_raw(index))
     }
 
     // silly nit: index is *exclusive* here
     fn prev_search(&self, index: usize) -> Option<usize> {
-        (index..self.messages.len())
-            .chain(0..index)
-            .rev()
-            .find(|&index| self.next_search_raw(index))
+        (0..index).rev().find(|&index| self.next_search_raw(index))
     }
 
     fn next_search_raw(&self, index: usize) -> bool {
@@ -240,7 +245,7 @@ impl eframe::App for App<'_> {
         self.ui_has_been_notified.store(false, Ordering::Relaxed);
         loop {
             match self.messages_reader.try_recv() {
-                Ok(message) => self.messages.push(message),
+                Ok(message) => self.recv_message(message),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     if self.end_time.is_none() {
@@ -253,7 +258,7 @@ impl eframe::App for App<'_> {
 
         let mut opened_search = false;
         ui.input_mut(|input| {
-            scroller_mouse_input(input, &mut self.scroll_value);
+            scroller_mouse_input(input, &mut self.state.scroll_value);
             if self.state.entering_search_text {
                 if input.consume_key(Modifiers::NONE, Key::Escape) {
                     self.state.entering_search_text = false;
@@ -261,7 +266,7 @@ impl eframe::App for App<'_> {
             } else {
                 scroller_key_input(
                     input,
-                    &mut self.scroll_value,
+                    &mut self.state.scroll_value,
                     self.messages.len(),
                     ui.clip_rect().height(),
                 );
@@ -275,22 +280,22 @@ impl eframe::App for App<'_> {
                         self.state.search = String::new();
                     }
                     if input.consume_key(Modifiers::SHIFT, Key::N)
-                        && let Some(index) = self.prev_search(self.scroll_value.index)
+                        && let Some(index) = self.prev_search(self.state.scroll_value.index)
                     {
-                        self.scroll_value.index = index;
-                        self.scroll_value.pixel_offset = 0.0;
+                        self.state.scroll_value.index = index;
+                        self.state.scroll_value.pixel_offset = 0.0;
                     }
                     if input.consume_key(Modifiers::NONE, Key::N)
-                        && let Some(index) =
-                            self.next_search((self.scroll_value.index + 1) % self.messages.len())
+                        && let Some(index) = self
+                            .next_search((self.state.scroll_value.index + 1) % self.messages.len())
                     {
-                        self.scroll_value.index = index;
-                        self.scroll_value.pixel_offset = 0.0;
+                        self.state.scroll_value.index = index;
+                        self.state.scroll_value.pixel_offset = 0.0;
                     }
                 }
             }
         });
-        clamp_scroller(&mut self.scroll_value, self.messages.len());
+        clamp_scroller(&mut self.state.scroll_value, self.messages.len());
         let mut ensure_search_onscreen = false;
         if self.state.entering_search_text || !self.state.search.is_empty() {
             Panel::bottom("search panel").show_inside(ui, |ui| {
@@ -350,9 +355,11 @@ impl eframe::App for App<'_> {
         self.state.search_onscreen = false;
         let panel = CentralPanel::default().frame(Frame::new().fill(Color32::from_rgb(38, 50, 56)));
         panel.show_inside(ui, |ui| {
+            let old_scroll = self.state.scroll_value.clone();
+            let mut big_adjusted_scroll = old_scroll.clone();
             big_scroller(
                 ui,
-                &mut self.scroll_value,
+                &mut big_adjusted_scroll,
                 self.messages.len(),
                 |ui, index| {
                     if self.messages[index].is_displayed(&self.messages, &self.state) {
@@ -366,19 +373,26 @@ impl eframe::App for App<'_> {
                     }
                 },
             );
+            // only take the big scroller's edit (which is a line/pixel shuffle to keep the same
+            // scroll) if the ui logic did not adjust the scroll (which is jumping around)
+            if self.state.scroll_value == old_scroll
+                && self.state.scroll_value != big_adjusted_scroll
+            {
+                self.state.scroll_value = big_adjusted_scroll;
+            }
         });
         if !self.state.search.is_empty()
             && !self.state.search_onscreen
             && ensure_search_onscreen
-            && let Some(index) = self.next_search(self.scroll_value.index)
+            && let Some(index) = self.next_search(self.state.scroll_value.index)
         {
-            self.scroll_value.index = index;
-            self.scroll_value.pixel_offset = 0.0;
+            self.state.scroll_value.index = index;
+            self.state.scroll_value.pixel_offset = 0.0;
         }
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, PartialEq)]
 struct ScrollValue {
     index: usize,
     pixel_offset: f32,
@@ -672,12 +686,15 @@ struct Message<'b> {
     #[allow(clippy::box_collection)]
     logparsed_message: Option<Box<Vec<logparse::Span<'b>>>>,
     parent: Option<usize>,
+    // if this is an Enter message, this is the index of the corresponding Exit
+    // NonZeroUsize to get a niche opti to keep the size down
+    exit: Option<NonZeroUsize>,
     // can probably be a u8, but it doesn't currently help struct size to make it u8
     indent: u32,
     state: MessageState,
 }
 
-const _: [(); std::mem::size_of::<usize>() * 19] = [(); std::mem::size_of::<Message>()];
+const _: [(); std::mem::size_of::<usize>() * 20] = [(); std::mem::size_of::<Message>()];
 
 #[derive(Default)]
 struct MessageState {
@@ -708,6 +725,7 @@ impl<'b> Message<'b> {
             parsed,
             logparsed_message: None,
             parent,
+            exit: None,
             indent: self_indent.try_into().unwrap_or(u32::MAX),
             state: MessageState::default(),
         })
@@ -789,6 +807,26 @@ impl<'b> Message<'b> {
                     filter: self.parsed.filename.to_string(),
                     exclude: true,
                 });
+            }
+            if let Some(exit) = self.exit {
+                if ui.button("jump to exit").clicked() {
+                    app_state.scroll_value = ScrollValue {
+                        index: exit.get(),
+                        pixel_offset: 0.0,
+                    }
+                }
+            } else if let Some(parent) = self.parent {
+                let msg = if self.parsed.hop_message() == Some(HopMessageKind::Exit) {
+                    "jump to enter"
+                } else {
+                    "jump to parent"
+                };
+                if ui.button(msg).clicked() {
+                    app_state.scroll_value = ScrollValue {
+                        index: parent,
+                        pixel_offset: 0.0,
+                    }
+                }
             }
         });
     }
@@ -956,6 +994,7 @@ impl<'b> Message<'b> {
 
     fn matches_search(&self, search: &str) -> bool {
         self.parsed.timestamp.contains(search)
+            || self.parsed.level.contains(search)
             || self.parsed.target.contains(search)
             || self.parsed.filename.contains(search)
             || self.parsed.line_number.contains(search)

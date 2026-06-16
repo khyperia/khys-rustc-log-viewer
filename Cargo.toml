@@ -9,5 +9,5 @@ bumpalo = "*"
 dirs = "*"
 eframe = "*"
 logparse = "*"
-serde = "*"
+serde = { version = "*", features = ["derive"] }
 serde_json = "*"

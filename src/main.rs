@@ -103,49 +103,67 @@ const LOGPARSE_CONFIG: logparse::Config = logparse::Config {
     pretty_print: None,
 };
 
-enum DataSource {
-    File(PathBuf),
-    Socket(std::vec::IntoIter<SocketAddr>),
-}
-
 fn main() -> anyhow::Result<()> {
-    let mut args = std::env::args().skip(1);
-    let path: DataSource = if let Some(first) = args.next() {
-        if let Some(second) = args.next() {
-            if first == "--tcp" {
-                match second.to_socket_addrs() {
-                    Ok(v) => DataSource::Socket(v),
-                    Err(e) => {
-                        println!("couldn't parse tcp address: {e}");
-                        return Ok(());
-                    }
-                }
-            } else {
-                println!(
-                    "Only one argument is allowed (the path that was given to RUSTC_LOG_OUTPUT_TARGET)"
-                );
-                return Ok(());
-            }
-        } else {
-            DataSource::File(PathBuf::from(first))
-        }
-    } else {
-        if let Ok(targ) = std::env::var("RUSTC_LOG_OUTPUT_TARGET") {
-            DataSource::File(PathBuf::from(targ))
-        } else {
-            println!("No file provided. Pass the file that was given to RUSTC_LOG_OUTPUT_TARGET");
-            return Ok(());
-        }
+    let Some(data_source) = parse_cmdline() else {
+        return Ok(());
     };
     let mut bump = Bump::new();
     std::thread::scope(|scope| {
         eframe::run_native(
             "Khy's rustc log viewer",
             NativeOptions::default(),
-            Box::new(|cc| Ok(Box::new(App::new(cc, &mut bump, scope, path)))),
+            Box::new(|cc| Ok(Box::new(App::new(cc, &mut bump, scope, data_source)))),
         )
     })?;
     Ok(())
+}
+
+enum DataSource {
+    File(PathBuf),
+    Socket(SocketDataSource),
+}
+
+struct SocketDataSource {
+    socket_addr: std::vec::IntoIter<SocketAddr>,
+    fork_after_listen: Vec<String>,
+}
+
+fn parse_cmdline() -> Option<DataSource> {
+    let mut args = std::env::args().skip(1);
+    if let Some(first) = args.next() {
+        if let Some(second) = args.next() {
+            if first == "--tcp" {
+                match second.to_socket_addrs() {
+                    Ok(socket_addr) => {
+                        let fork_after_listen = args.collect();
+                        let socket = SocketDataSource {
+                            socket_addr,
+                            fork_after_listen,
+                        };
+                        Some(DataSource::Socket(socket))
+                    }
+                    Err(e) => {
+                        println!("couldn't parse tcp address: {e}");
+                        None
+                    }
+                }
+            } else {
+                println!(
+                    "Only one argument is allowed (the path that was given to RUSTC_LOG_OUTPUT_TARGET)"
+                );
+                None
+            }
+        } else {
+            Some(DataSource::File(PathBuf::from(first)))
+        }
+    } else {
+        if let Ok(targ) = std::env::var("RUSTC_LOG_OUTPUT_TARGET") {
+            Some(DataSource::File(PathBuf::from(targ)))
+        } else {
+            println!("No file provided. Pass the file that was given to RUSTC_LOG_OUTPUT_TARGET");
+            None
+        }
+    }
 }
 
 struct App<'b> {
@@ -665,10 +683,19 @@ fn read_lines<'b: 'scope, 'scope, 'env>(
             parse_from_reader(bump, notify_ui_thread, send, file)
         }
         DataSource::Socket(addr) => {
-            let listener = TcpListener::bind(addr.as_slice()).unwrap();
+            let listener = TcpListener::bind(addr.socket_addr.as_slice()).unwrap();
+            let child = addr.fork_after_listen.first().map(|cmd| {
+                std::process::Command::new(cmd)
+                    .args(&addr.fork_after_listen[1..])
+                    .spawn()
+                    .expect("couldn't spawn fork-after-tcp process")
+            });
             let (stream, _) = listener.accept().unwrap();
             drop(listener);
-            parse_from_reader(bump, notify_ui_thread, send, stream)
+            parse_from_reader(bump, notify_ui_thread, send, stream);
+            if let Some(mut child) = child {
+                child.kill().expect("couldn't kill fork-after-tcp process")
+            }
         }
     });
 

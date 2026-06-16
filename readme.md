@@ -50,6 +50,36 @@ end
 
 Once the app is running, uuuh, it's a bit of a WIP mess right now, there's vaguely less/vim-like keybindings I guess
 
+# Remote usage
+
+This is a bit advanced, sorry. There's another format the log viewer can run in, with the `--tcp` argument. This hosts a
+tcp listener, and uses the data that comes over it as the data stream. After the `--tcp` argument is an optional command
+to fork after the tcp listener has successfully set up. I use it like this (replace `$argv` with the ssh host you want
+to connect to):
+
+```fish
+cargo run --release --manifest-path ~/me/khys-rustc-log-viewer/Cargo.toml -- --tcp localhost:12543 ssh -T -C -R 12543:localhost:12543 $argv 'socat -u PIPE:/tmp/viewlog TCP:localhost:12543'
+```
+
+This command does the following:
+
+- Runs the log viewer, hosting a tcp listener on `localhost:12543`
+- Then, connects to a remote host via ssh
+  - the -T argument disables tty allocation (idk if it's needed, shrug)
+  - the -C argument enables compression (extremely important, this reduces the amount of data sent by over 95%)
+  - the `-R 12543:localhost:12543` argument forwards any connection to `localhost:12543` on the remote host to `localhost:12543` on the local host
+- Then, on the remote host, socat is used to translate from a named pipe to a TCP connection (socat must be installed on the remote host)
+  - the -u argument is for "unidirectional" (only go from the pipe to the tcp socket, not the other way around)
+    - this is required to make closing the tcp socket work properly when the named pipe has an EOF
+  - fyi: socat automatically creates `/tmp/viewlog` as a named pipe if it doesn't already exist :3
+
+Once this command is running, you may run rustc on the host with `RUSTC_LOG_OUTPUT_TARGET=/tmp/viewlog` and the log will
+show up in your local log viewer GUI. I personally use a variant of my `viewlog` fish alias, but with the `cargo run
+[...]` line removed, as well as replacing the `mkfifo` with a print error and return.
+
+... currently I'm kind of having a WIP of like, not making my log viewer be a oneshot, but rather be able to clear and
+reload data from running again. Bump allocator lifetimes in a GUI app are hard.
+
 # I need to apologize
 
 I handrolled my own json parser for this (sorry...). That means that if you try to use this, it might be kinda brittle.

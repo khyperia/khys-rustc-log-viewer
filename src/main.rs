@@ -11,14 +11,15 @@ use std::{
     error::Error,
     fmt::{self, Debug, Display, Formatter},
     fs::File,
-    io::{BufRead, BufReader, BufWriter},
+    io::{BufRead, BufReader, BufWriter, Read},
+    net::{SocketAddr, TcpListener, ToSocketAddrs},
     num::NonZeroUsize,
     path::PathBuf,
     str::Chars,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, SendError, TryRecvError},
+        mpsc::{self, Receiver, SendError, Sender, TryRecvError},
     },
     time::Instant,
 };
@@ -102,20 +103,35 @@ const LOGPARSE_CONFIG: logparse::Config = logparse::Config {
     pretty_print: None,
 };
 
+enum DataSource {
+    File(PathBuf),
+    Socket(std::vec::IntoIter<SocketAddr>),
+}
+
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
-    let path = if let Some(first) = args.next() {
-        if args.next().is_none() {
-            PathBuf::from(first)
+    let path: DataSource = if let Some(first) = args.next() {
+        if let Some(second) = args.next() {
+            if first == "--tcp" {
+                match second.to_socket_addrs() {
+                    Ok(v) => DataSource::Socket(v),
+                    Err(e) => {
+                        println!("couldn't parse tcp address: {e}");
+                        return Ok(());
+                    }
+                }
+            } else {
+                println!(
+                    "Only one argument is allowed (the path that was given to RUSTC_LOG_OUTPUT_TARGET)"
+                );
+                return Ok(());
+            }
         } else {
-            println!(
-                "Only one argument is allowed (the path that was given to RUSTC_LOG_OUTPUT_TARGET)"
-            );
-            return Ok(());
+            DataSource::File(PathBuf::from(first))
         }
     } else {
         if let Ok(targ) = std::env::var("RUSTC_LOG_OUTPUT_TARGET") {
-            PathBuf::from(targ)
+            DataSource::File(PathBuf::from(targ))
         } else {
             println!("No file provided. Pass the file that was given to RUSTC_LOG_OUTPUT_TARGET");
             return Ok(());
@@ -136,7 +152,7 @@ struct App<'b> {
     messages: Vec<Message<'b>>,
     messages_reader: Receiver<Message<'b>>,
     ui_has_been_notified: Arc<AtomicBool>,
-    start_time: Instant,
+    start_time: Option<Instant>,
     end_time: Option<Instant>,
     state: AppState,
 }
@@ -192,7 +208,7 @@ impl<'b> App<'b> {
         cc: &CreationContext,
         bump: &'b mut Bump,
         scope: &'scope std::thread::Scope<'scope, 'env>,
-        path: PathBuf,
+        data_source: DataSource,
     ) -> Self
     where
         'b: 'scope,
@@ -200,7 +216,7 @@ impl<'b> App<'b> {
         let ui_has_been_notified = Arc::new(AtomicBool::new(false));
         let atomic_bool = ui_has_been_notified.clone();
         let egui_ctx = cc.egui_ctx.clone();
-        let messages_reader = read_lines(bump, scope, path, move || {
+        let messages_reader = read_lines(bump, scope, data_source, move || {
             if !atomic_bool.swap(true, Ordering::Relaxed) {
                 egui_ctx.request_repaint();
             }
@@ -209,13 +225,16 @@ impl<'b> App<'b> {
             messages: vec![],
             messages_reader,
             ui_has_been_notified,
-            start_time: Instant::now(),
+            start_time: None,
             end_time: None,
             state: AppState::new(),
         }
     }
 
     fn recv_message(&mut self, message: Message<'b>) {
+        if self.start_time.is_none() {
+            self.start_time = Some(Instant::now());
+        }
         if message.parsed.hop_message() == Some(HopMessageKind::Exit)
             && let Some(parent) = message.parent
         {
@@ -321,12 +340,14 @@ impl eframe::App for App<'_> {
         Panel::top("filter panel").show_inside(ui, |ui| {
             let mut id_salt = 0;
             ui.horizontal(|ui| {
-                let end = self.end_time.unwrap_or_else(Instant::now);
-                ui.label(format!(
-                    "{} messages in {:?}",
-                    self.messages.len(),
-                    end - self.start_time,
-                ));
+                if let Some(start_time) = self.start_time {
+                    let end = self.end_time.unwrap_or_else(Instant::now);
+                    ui.label(format!(
+                        "{} messages in {:?}",
+                        self.messages.len(),
+                        end - start_time,
+                    ));
+                }
                 ui.checkbox(&mut self.state.timestamps, "timestamps");
                 ui.checkbox(&mut self.state.log_levels, "log levels");
                 ui.checkbox(&mut self.state.targets, "targets");
@@ -633,34 +654,51 @@ impl FilterKind {
 fn read_lines<'b: 'scope, 'scope, 'env>(
     bump: &'b mut Bump,
     scope: &'scope std::thread::Scope<'scope, 'env>,
-    path: PathBuf,
+    data_source: DataSource,
     notify_ui_thread: impl Fn() + Send + 'static,
 ) -> Receiver<Message<'b>> {
     let (send, recv) = mpsc::channel();
 
-    scope.spawn(move || {
-        let file = File::open(path).unwrap();
-        let mut reader = BufReader::new(file);
-        let mut parent_stack = vec![];
-        let mut i = 0;
-        let mut line = String::new();
-        loop {
-            line.clear();
-            let bytes_read = reader.read_line(&mut line).unwrap();
-            if bytes_read == 0 {
-                break;
-            }
-            let message = Message::new(bump, &line, i, &mut parent_stack).unwrap();
-            match send.send(message) {
-                Ok(()) => (),
-                Err(SendError(_)) => break,
-            }
-            notify_ui_thread();
-            i += 1;
+    scope.spawn(move || match data_source {
+        DataSource::File(path) => {
+            let file = File::open(path).unwrap();
+            parse_from_reader(bump, notify_ui_thread, send, file)
+        }
+        DataSource::Socket(addr) => {
+            let listener = TcpListener::bind(addr.as_slice()).unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            drop(listener);
+            parse_from_reader(bump, notify_ui_thread, send, stream)
         }
     });
 
     recv
+}
+
+fn parse_from_reader<'b>(
+    bump: &'b mut Bump,
+    notify_ui_thread: impl Fn() + Send + 'static,
+    send: Sender<Message<'b>>,
+    reader: impl Read,
+) {
+    let mut reader = BufReader::new(reader);
+    let mut parent_stack = vec![];
+    let mut i = 0;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let bytes_read = reader.read_line(&mut line).unwrap();
+        if bytes_read == 0 {
+            break;
+        }
+        let message = Message::new(bump, &line, i, &mut parent_stack).unwrap();
+        match send.send(message) {
+            Ok(()) => (),
+            Err(SendError(_)) => break,
+        }
+        notify_ui_thread();
+        i += 1;
+    }
 }
 
 #[inline]

@@ -1,17 +1,14 @@
 Khy's rustc log viewer
 ===
 
-Under heavy development and very much a work in progress (unless I stop working on it and forget to update this
-readme...)
-
 This is a viewer app for [`RUSTC_LOG`](https://rustc-dev-guide.rust-lang.org/tracing.html), intended for development on
 rustc. The default format omits several extremely useful bits of information that you typically don't want to see, but
 sometimes you do, preferably without running rustc with different log flags. So, this is a GUI app that lets you
 dynamically view/hide/filter `RUSTC_LOG` information.
 
-Developed as a personal project, not currently intended to be used by others, but published in case someone wants to
-either use it or take inspiration from it (MIT licensed). Please send me a message if you find this useful, I'd love to
-hear from you!
+Developed as a personal project mostly for my own use, but published in case someone wants to either use it or take
+inspiration from it (MIT licensed). It's fairly stable at this point and I'm using it pretty regularly for my work.
+Please send me a message if you find this useful, I'd love to hear from you!
 
 # Usage
 
@@ -48,7 +45,7 @@ end
 - presumes you've [set up `+stage1`](https://rustc-dev-guide.rust-lang.org/building/how-to-build-and-run.html#creating-a-rustup-toolchain)
 - passes through $argv to rustc, presumably a path to a UI test
 
-Once the app is running, uuuh, it's a bit of a WIP mess right now, there's vaguely less/vim-like keybindings I guess
+Once the app is running, uuuh, it's a bit of a WIP mess, there's vaguely less/vim-like keybindings I guess
 
 # Remote usage
 
@@ -75,10 +72,10 @@ This command does the following:
 
 Once this command is running, you may run rustc on the host with `RUSTC_LOG_OUTPUT_TARGET=/tmp/viewlog` and the log will
 show up in your local log viewer GUI. I personally use a variant of my `viewlog` fish alias, but with the `cargo run
-[...]` line removed, as well as replacing the `mkfifo` with a print error and return.
+[...]` line removed, as well as replacing the `mkfifo` with a check if it exsts, printing an error and returning if not.
 
-... currently I'm kind of having a WIP of like, not making my log viewer be a oneshot, but rather be able to clear and
-reload data from running again. Bump allocator lifetimes in a GUI app are hard.
+... I'd like the app to not be a oneshot, but rather be able to clear and reload data from running again... but bump
+allocator lifetimes in a GUI app are hard.
 
 # I need to apologize
 

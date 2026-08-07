@@ -3,7 +3,8 @@ use eframe::{
     CreationContext, NativeOptions,
     egui::{
         CentralPanel, Color32, ComboBox, FontId, Frame, InputState, Key, Modifiers, Panel,
-        TextFormat, Ui, UiBuilder, text::LayoutJob,
+        TextFormat, Ui, UiBuilder,
+        text::{LayoutJob, LayoutSection},
     },
 };
 use serde::{Deserialize, Serialize};
@@ -210,15 +211,6 @@ impl AppState {
             s.contains(&self.search)
         }
     }
-
-    fn vdict_matches_search(&self, list: &LinkedList<Span>) -> bool {
-        if self.search.is_empty() {
-            false
-        } else {
-            list.iter()
-                .any(|map| span_matches_search(map, &self.search))
-        }
-    }
 }
 
 impl<'b> App<'b> {
@@ -273,7 +265,11 @@ impl<'b> App<'b> {
 
     fn next_search_raw(&self, index: usize) -> bool {
         self.messages[index].is_displayed(&self.messages, &self.state)
-            && self.messages[index].matches_search(&self.state.search)
+            && (self.messages[index].matches_search(&self.state.search) || {
+                let mut job = String::new();
+                self.messages[index].build_text(&self.state, &mut job);
+                job.contains(&self.state.search)
+            })
     }
 }
 
@@ -826,26 +822,23 @@ impl<'b> Message<'b> {
 
     fn ui(&mut self, parent: Option<&mut Message>, app_state: &mut AppState, ui: &mut Ui) {
         self.logparse_single_message();
-        let mut job = StrBuilder {
-            job: LayoutJob::default(),
-            app_state,
-            found_search: false,
-        };
-        self.build_text(&mut job);
-        let rsp = if !job.found_search
+        let mut job = LayoutJob::default();
+        self.build_text(app_state, &mut job);
+        let mut found_search = Self::handle_search(app_state, &mut job);
+        let rsp = if !found_search
             && !app_state.search.is_empty()
             && self.matches_search(&app_state.search)
         {
-            job.found_search = true;
+            found_search = true;
             // fallback to highlight the whole message if we're not displaying the matching text
             Frame::NONE
                 .fill(HLSEARCH)
-                .show(ui, |ui| ui.label(job.job.clone()))
+                .show(ui, |ui| ui.label(job.clone()))
                 .inner
         } else {
-            ui.label(job.job.clone())
+            ui.label(job.clone())
         };
-        if job.found_search && ui.clip_rect().intersects(rsp.rect) {
+        if found_search && ui.clip_rect().intersects(rsp.rect) {
             app_state.search_onscreen = true;
         }
         rsp.context_menu(|ui| {
@@ -873,24 +866,26 @@ impl<'b> Message<'b> {
                     exclude: true,
                 });
             }
-            if let Some(exit) = self.exit {
-                if ui.button("jump to exit").clicked() {
-                    app_state.scroll_value = ScrollValue {
-                        index: exit.get(),
-                        pixel_offset: 0.0,
-                    }
+            if let Some(exit) = self.exit
+                && ui.button("jump to exit").clicked()
+            {
+                app_state.scroll_value = ScrollValue {
+                    index: exit.get(),
+                    pixel_offset: 0.0,
                 }
-            } else if let Some(parent) = self.parent {
-                let msg = if self.parsed.hop_message() == Some(HopMessageKind::Exit) {
-                    "jump to enter"
-                } else {
-                    "jump to parent"
-                };
-                if ui.button(msg).clicked() {
-                    app_state.scroll_value = ScrollValue {
-                        index: parent,
-                        pixel_offset: 0.0,
-                    }
+            }
+            if let Some(parent) = self.parent
+                && ui
+                    .button(if self.parsed.hop_message() == Some(HopMessageKind::Exit) {
+                        "jump to enter"
+                    } else {
+                        "jump to parent"
+                    })
+                    .clicked()
+            {
+                app_state.scroll_value = ScrollValue {
+                    index: parent,
+                    pixel_offset: 0.0,
                 }
             }
         });
@@ -927,7 +922,7 @@ impl<'b> Message<'b> {
         }
     }
 
-    fn build_text(&self, job: &mut StrBuilder) {
+    fn build_text(&self, app_state: &AppState, job: &mut impl Appendable) {
         if let Some(hop) = self.parsed.hop_message() {
             let text = match hop {
                 HopMessageKind::Enter => {
@@ -942,17 +937,16 @@ impl<'b> Message<'b> {
             job.append(text, 0.0, text_format_color(SPAN));
         }
 
-        if job.app_state.timestamps || job.app_state.matches_search(self.parsed.timestamp) {
+        if app_state.timestamps || app_state.matches_search(self.parsed.timestamp) {
             job.append(self.parsed.timestamp, 0.0, text_format_color(TIMESTAMP));
             job.append(" ", 0.0, text_format());
         }
-        if job.app_state.log_levels || job.app_state.matches_search(self.parsed.level) {
+        if app_state.log_levels || app_state.matches_search(self.parsed.level) {
             let color = log_level_color(self.parsed.level);
             job.append(self.parsed.level, 0.0, text_format_color(color));
             job.append(" ", 0.0, text_format());
         }
-        let target_displayed =
-            job.app_state.targets || job.app_state.matches_search(self.parsed.target);
+        let target_displayed = app_state.targets || app_state.matches_search(self.parsed.target);
         if target_displayed {
             job.append(self.parsed.target, 0.0, text_format_color(TARGET));
         }
@@ -966,21 +960,15 @@ impl<'b> Message<'b> {
             job.append(self.parsed.target, 0.0, text_format_color(TARGET));
         }
         self.fields(job);
-        if self.state.display_filename
-            || !job.found_search
-                && (job.app_state.matches_search(self.parsed.filename)
-                    || job.app_state.matches_search(self.parsed.line_number))
-        {
+        if self.state.display_filename {
             self.filename(job);
         }
-        if self.state.display_spans
-            || !job.found_search && job.app_state.vdict_matches_search(self.parsed.spans)
-        {
+        if self.state.display_spans {
             self.spans(job);
         }
     }
 
-    fn fields(&self, job: &mut StrBuilder) {
+    fn fields(&self, job: &mut impl Appendable) {
         if let JsonMap::Cons {
             next: JsonMap::Empty,
             ..
@@ -1025,14 +1013,14 @@ impl<'b> Message<'b> {
         }
     }
 
-    fn filename(&self, job: &mut StrBuilder) {
+    fn filename(&self, job: &mut impl Appendable) {
         job.append("\n", 0.0, text_format());
         job.append(self.parsed.filename, INDENT, text_format_color(FILENAME));
         job.append(":", 0.0, text_format_color(FILENAME));
         job.append(self.parsed.line_number, 0.0, text_format_color(FILENAME));
     }
 
-    fn spans(&self, job: &mut StrBuilder) {
+    fn spans(&self, job: &mut impl Appendable) {
         for span in self.parsed.spans.iter() {
             job.append("\n", 0.0, text_format());
             let name = span.name.unwrap_or("---");
@@ -1041,7 +1029,7 @@ impl<'b> Message<'b> {
         }
     }
 
-    fn dict(job: &mut StrBuilder, mut indent: f32, key_color: Color32, map: &JsonMap) {
+    fn dict(job: &mut impl Appendable, mut indent: f32, key_color: Color32, map: &JsonMap) {
         let total: usize = map.iter().map(|(k, v)| k.len() + v.len()).sum();
         let sep = if total > 100 {
             "\n"
@@ -1071,6 +1059,44 @@ impl<'b> Message<'b> {
                 .iter()
                 .any(|m| span_matches_search(m, search))
     }
+
+    fn handle_search(app_state: &AppState, job: &mut LayoutJob) -> bool {
+        if app_state.search.is_empty() {
+            return false;
+        }
+        let mut any = false;
+        for (ind, match_text) in job.text.match_indices(&app_state.search) {
+            any = true;
+            let match_range = ind..(ind + match_text.len());
+            Self::ensure_splits_at(&mut job.sections, match_range.start);
+            Self::ensure_splits_at(&mut job.sections, match_range.end);
+            for section in &mut job.sections {
+                assert!(
+                    match_range.end <= section.byte_range.start
+                        || section.byte_range.end <= match_range.start
+                        || match_range.start <= section.byte_range.start
+                            && match_range.end >= section.byte_range.end
+                );
+                if match_range.contains(&section.byte_range.start) {
+                    section.format.background = HLSEARCH;
+                }
+            }
+        }
+        any
+    }
+
+    fn ensure_splits_at(sections: &mut Vec<LayoutSection>, index: usize) {
+        let mut i = 0;
+        while i < sections.len() {
+            let byte_range = sections[i].byte_range.clone();
+            if byte_range.contains(&index) && index != byte_range.start && index != byte_range.end {
+                sections.insert(i + 1, sections[i].clone());
+                sections[i].byte_range.end = index;
+                sections[i + 1].byte_range.start = index;
+            }
+            i += 1;
+        }
+    }
 }
 
 fn span_matches_search(map: &Span, search: &str) -> bool {
@@ -1088,36 +1114,19 @@ enum HopMessageKind {
     Exit,
 }
 
-struct StrBuilder<'a> {
-    job: LayoutJob,
-    app_state: &'a AppState,
-    found_search: bool,
+trait Appendable {
+    fn append(&mut self, text: &str, leading_space: f32, format: TextFormat);
 }
 
-impl StrBuilder<'_> {
-    fn append(&mut self, text: &str, mut leading_space: f32, format: TextFormat) {
-        let mut last_ind = 0;
-        if !self.app_state.search.is_empty() {
-            for (ind, match_text) in text.match_indices(&self.app_state.search) {
-                let prefix = &text[last_ind..ind];
-                if !prefix.is_empty() {
-                    let fmt = format.clone();
-                    self.job.append(&text[last_ind..ind], leading_space, fmt);
-                    leading_space = 0.0;
-                }
-                let mut fmt = format.clone();
-                fmt.background = HLSEARCH;
-                // section.format.background = HLSEARCH;
-                // section.leading_space = 0.0;
-                // suffix.leading_space = 0.0;
-                self.job
-                    .append(&text[ind..(ind + match_text.len())], leading_space, fmt);
-                leading_space = 0.0;
-                last_ind = ind + match_text.len();
-                self.found_search = true;
-            }
-        }
-        self.job.append(&text[last_ind..], leading_space, format);
+impl Appendable for String {
+    fn append(&mut self, text: &str, _leading_space: f32, _format: TextFormat) {
+        self.push_str(text);
+    }
+}
+
+impl Appendable for LayoutJob {
+    fn append(&mut self, text: &str, leading_space: f32, format: TextFormat) {
+        self.append(text, leading_space, format);
     }
 }
 

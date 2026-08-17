@@ -6,6 +6,7 @@ use eframe::{
         TextFormat, Ui, UiBuilder,
         text::{LayoutJob, LayoutSection},
     },
+    egui_wgpu,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -108,11 +109,26 @@ fn main() -> anyhow::Result<()> {
     let Some(data_source) = parse_cmdline() else {
         return Ok(());
     };
+
+    let mut opts = NativeOptions::default();
+    match &mut opts.wgpu_options.wgpu_setup {
+        egui_wgpu::WgpuSetup::CreateNew(setup) => {
+            let old = std::mem::replace(&mut setup.device_descriptor, Arc::new(|_| unreachable!()));
+            setup.device_descriptor = Arc::new(move |adapter| {
+                let mut descr = old(adapter);
+                // Oli has no dedicated GPU
+                descr.required_limits.max_texture_dimension_3d = 512;
+                descr
+            })
+        }
+        eframe::egui_wgpu::WgpuSetup::Existing(_) => unreachable!(),
+    }
+
     let mut bump = Bump::new();
     std::thread::scope(|scope| {
         eframe::run_native(
             "Khy's rustc log viewer",
-            NativeOptions::default(),
+            opts,
             Box::new(|cc| Ok(Box::new(App::new(cc, &mut bump, scope, data_source)))),
         )
     })?;

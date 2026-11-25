@@ -1,13 +1,13 @@
 use bumpalo::Bump;
 use eframe::{
     CreationContext, NativeOptions,
-    egui::{CentralPanel, Color32, FontId, Frame, Key, Modifiers, Panel, TextFormat, Ui},
+    egui::{CentralPanel, Color32, Frame, Key, Modifiers, Panel, Ui},
     egui_wgpu,
 };
 use std::{
     fs::File,
     io::{BufRead, BufReader, Read},
-    net::{SocketAddr, TcpListener, ToSocketAddrs},
+    net::{SocketAddr, TcpListener},
     num::NonZeroUsize,
     path::PathBuf,
     sync::{
@@ -20,6 +20,7 @@ use std::{
 
 use crate::filter::Filter;
 
+mod cli;
 mod filter;
 mod message;
 mod parser;
@@ -105,7 +106,7 @@ const LOGPARSE_CONFIG: logparse::Config = logparse::Config {
 };
 
 fn main() -> anyhow::Result<()> {
-    let Some(data_source) = parse_cmdline() else {
+    let Some(data_source) = cli::parse_cmdline() else {
         return Ok(());
     };
 
@@ -142,44 +143,6 @@ enum DataSource {
 struct SocketDataSource {
     socket_addr: std::vec::IntoIter<SocketAddr>,
     fork_after_listen: Vec<String>,
-}
-
-fn parse_cmdline() -> Option<DataSource> {
-    let mut args = std::env::args().skip(1);
-    if let Some(first) = args.next() {
-        if let Some(second) = args.next() {
-            if first == "--tcp" {
-                match second.to_socket_addrs() {
-                    Ok(socket_addr) => {
-                        let fork_after_listen = args.collect();
-                        let socket = SocketDataSource {
-                            socket_addr,
-                            fork_after_listen,
-                        };
-                        Some(DataSource::Socket(socket))
-                    }
-                    Err(e) => {
-                        println!("couldn't parse tcp address: {e}");
-                        None
-                    }
-                }
-            } else {
-                println!(
-                    "Only one argument is allowed (the path that was given to RUSTC_LOG_OUTPUT_TARGET)"
-                );
-                None
-            }
-        } else {
-            Some(DataSource::File(PathBuf::from(first)))
-        }
-    } else {
-        if let Ok(targ) = std::env::var("RUSTC_LOG_OUTPUT_TARGET") {
-            Some(DataSource::File(PathBuf::from(targ)))
-        } else {
-            println!("No file provided. Pass the file that was given to RUSTC_LOG_OUTPUT_TARGET");
-            None
-        }
-    }
 }
 
 struct App<'b> {

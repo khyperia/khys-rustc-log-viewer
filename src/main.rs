@@ -499,23 +499,6 @@ fn parse_from_reader<'b>(
     }
 }
 
-#[inline]
-fn text_format() -> TextFormat {
-    TextFormat {
-        font_id: FontId::monospace(14.0),
-        ..TextFormat::default()
-    }
-}
-
-#[inline]
-fn text_format_color(color: Color32) -> TextFormat {
-    TextFormat {
-        font_id: FontId::monospace(14.0),
-        color,
-        ..text_format()
-    }
-}
-
 #[derive(PartialEq, Eq)]
 enum HopMessageKind {
     Enter,

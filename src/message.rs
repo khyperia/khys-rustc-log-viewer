@@ -4,7 +4,7 @@ use super::{
     filter::{Filter, FilterKind},
     log_level_color, logparse_color,
     parser::{JsonMap, LinkedList, ParsedMessage},
-    scroller, text_format, text_format_color,
+    scroller,
 };
 use bumpalo::Bump;
 use eframe::egui::{
@@ -379,5 +379,22 @@ impl Appendable for String {
 impl Appendable for LayoutJob {
     fn append(&mut self, text: &str, leading_space: f32, format: TextFormat) {
         self.append(text, leading_space, format);
+    }
+}
+
+#[inline]
+fn text_format() -> TextFormat {
+    TextFormat {
+        font_id: FontId::monospace(14.0),
+        ..TextFormat::default()
+    }
+}
+
+#[inline]
+fn text_format_color(color: Color32) -> TextFormat {
+    TextFormat {
+        font_id: FontId::monospace(14.0),
+        color,
+        ..text_format()
     }
 }

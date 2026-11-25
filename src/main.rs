@@ -2,8 +2,7 @@ use bumpalo::Bump;
 use eframe::{
     CreationContext, NativeOptions,
     egui::{
-        CentralPanel, Color32, FontId, Frame, InputState, Key, Modifiers, Panel, TextFormat, Ui,
-        UiBuilder,
+        CentralPanel, Color32, FontId, Frame, Key, Modifiers, Panel, TextFormat, Ui, UiBuilder,
         text::{LayoutJob, LayoutSection},
     },
     egui_wgpu,
@@ -195,7 +194,7 @@ struct App<'b> {
 
 #[derive(Default)]
 struct AppState {
-    scroll_value: ScrollValue,
+    scroll_value: scroller::ScrollValue,
     entering_search_text: bool,
     search: String,
     search_onscreen: bool,
@@ -308,13 +307,13 @@ impl eframe::App for App<'_> {
 
         let mut opened_search = false;
         ui.input_mut(|input| {
-            scroller_mouse_input(input, &mut self.state.scroll_value);
+            scroller::scroller_mouse_input(input, &mut self.state.scroll_value);
             if self.state.entering_search_text {
                 if input.consume_key(Modifiers::NONE, Key::Escape) {
                     self.state.entering_search_text = false;
                 }
             } else {
-                scroller_key_input(
+                scroller::scroller_key_input(
                     input,
                     &mut self.state.scroll_value,
                     self.messages.len(),
@@ -345,7 +344,7 @@ impl eframe::App for App<'_> {
                 }
             }
         });
-        clamp_scroller(&mut self.state.scroll_value, self.messages.len());
+        scroller::clamp_scroller(&mut self.state.scroll_value, self.messages.len());
         let mut ensure_search_onscreen = false;
         if self.state.entering_search_text || !self.state.search.is_empty() {
             Panel::bottom("search panel").show_inside(ui, |ui| {
@@ -409,7 +408,7 @@ impl eframe::App for App<'_> {
         panel.show_inside(ui, |ui| {
             let old_scroll = self.state.scroll_value.clone();
             let mut big_adjusted_scroll = old_scroll.clone();
-            big_scroller(
+            scroller::big_scroller(
                 ui,
                 &mut big_adjusted_scroll,
                 self.messages.len(),
@@ -444,91 +443,104 @@ impl eframe::App for App<'_> {
     }
 }
 
-#[derive(Default, Clone, PartialEq)]
-struct ScrollValue {
-    index: usize,
-    pixel_offset: f32,
-}
+mod scroller {
+    use eframe::egui::{InputState, Key, Modifiers, Ui, UiBuilder};
 
-fn clamp_scroller(value: &mut ScrollValue, len: usize) {
-    if value.index == 0 && value.pixel_offset < 0.0 {
-        value.pixel_offset = 0.0;
+    #[derive(Default, Clone, PartialEq)]
+    pub struct ScrollValue {
+        pub index: usize,
+        pub pixel_offset: f32,
     }
-    if value.index >= len && value.pixel_offset > 0.0 {
-        value.pixel_offset = 0.0;
-    }
-}
 
-fn scroller_mouse_input(input: &mut InputState, value: &mut ScrollValue) {
-    let scroll_mult = -4.0; // inverted?
-    value.pixel_offset += input.smooth_scroll_delta.y * scroll_mult;
-    input.smooth_scroll_delta.y = 0.0;
-}
-
-fn scroller_key_input(input: &mut InputState, value: &mut ScrollValue, len: usize, ui_height: f32) {
-    if input.consume_key(Modifiers::NONE, Key::J) {
-        value.pixel_offset += 20.0; // TODO: how to get line height?
-    }
-    if input.consume_key(Modifiers::NONE, Key::K) {
-        value.pixel_offset -= 20.0; // TODO: how to get line height?
-    }
-    if input.consume_key(Modifiers::NONE, Key::D)
-        || input.consume_key(Modifiers::CTRL, Key::D)
-        || input.consume_key(Modifiers::NONE, Key::PageDown)
-    {
-        value.pixel_offset += ui_height / 2.0;
-    }
-    if input.consume_key(Modifiers::NONE, Key::U)
-        || input.consume_key(Modifiers::CTRL, Key::U)
-        || input.consume_key(Modifiers::NONE, Key::PageUp)
-    {
-        value.pixel_offset -= ui_height / 2.0;
-    }
-    if input.consume_key(Modifiers::NONE, Key::End) || input.consume_key(Modifiers::SHIFT, Key::G) {
-        value.index = len - 1;
-    }
-    if input.consume_key(Modifiers::NONE, Key::Home) || input.consume_key(Modifiers::NONE, Key::G) {
-        value.index = 0;
-    }
-}
-
-fn big_scroller(
-    ui: &mut Ui,
-    value: &mut ScrollValue,
-    len: usize,
-    mut draw: impl FnMut(&mut Ui, usize),
-) {
-    ui.scope(|ui| {
-        let max_rect = ui.max_rect();
-        let absolute_begin = ui.next_widget_position().y;
-        ui.add_space(-value.pixel_offset);
-        ui.skip_ahead_auto_ids(value.index);
-        for index in value.index..len {
-            let begin = ui.next_widget_position().y;
-            draw(ui, index);
-            let end = ui.next_widget_position().y;
-            if end > max_rect.bottom() {
-                break;
-            }
-            if end < absolute_begin && value.index < len {
-                value.index += 1;
-                let size = end - begin;
-                value.pixel_offset -= size;
-            }
+    pub fn clamp_scroller(value: &mut ScrollValue, len: usize) {
+        if value.index == 0 && value.pixel_offset < 0.0 {
+            value.pixel_offset = 0.0;
         }
-    });
+        if value.index >= len && value.pixel_offset > 0.0 {
+            value.pixel_offset = 0.0;
+        }
+    }
 
-    // this messes up the drawing of the main content, idk why, so put it after
-    if value.pixel_offset < 0.0 && value.index > 0 {
-        ui.scope_builder(UiBuilder::new().sizing_pass().invisible(), |ui| {
-            while value.pixel_offset < 0.0 && value.index > 0 {
+    pub fn scroller_mouse_input(input: &mut InputState, value: &mut ScrollValue) {
+        let scroll_mult = -4.0; // inverted?
+        value.pixel_offset += input.smooth_scroll_delta.y * scroll_mult;
+        input.smooth_scroll_delta.y = 0.0;
+    }
+
+    pub fn scroller_key_input(
+        input: &mut InputState,
+        value: &mut ScrollValue,
+        len: usize,
+        ui_height: f32,
+    ) {
+        if input.consume_key(Modifiers::NONE, Key::J) {
+            value.pixel_offset += 20.0; // TODO: how to get line height?
+        }
+        if input.consume_key(Modifiers::NONE, Key::K) {
+            value.pixel_offset -= 20.0; // TODO: how to get line height?
+        }
+        if input.consume_key(Modifiers::NONE, Key::D)
+            || input.consume_key(Modifiers::CTRL, Key::D)
+            || input.consume_key(Modifiers::NONE, Key::PageDown)
+        {
+            value.pixel_offset += ui_height / 2.0;
+        }
+        if input.consume_key(Modifiers::NONE, Key::U)
+            || input.consume_key(Modifiers::CTRL, Key::U)
+            || input.consume_key(Modifiers::NONE, Key::PageUp)
+        {
+            value.pixel_offset -= ui_height / 2.0;
+        }
+        if input.consume_key(Modifiers::NONE, Key::End)
+            || input.consume_key(Modifiers::SHIFT, Key::G)
+        {
+            value.index = len - 1;
+        }
+        if input.consume_key(Modifiers::NONE, Key::Home)
+            || input.consume_key(Modifiers::NONE, Key::G)
+        {
+            value.index = 0;
+        }
+    }
+
+    pub fn big_scroller(
+        ui: &mut Ui,
+        value: &mut ScrollValue,
+        len: usize,
+        mut draw: impl FnMut(&mut Ui, usize),
+    ) {
+        ui.scope(|ui| {
+            let max_rect = ui.max_rect();
+            let absolute_begin = ui.next_widget_position().y;
+            ui.add_space(-value.pixel_offset);
+            ui.skip_ahead_auto_ids(value.index);
+            for index in value.index..len {
                 let begin = ui.next_widget_position().y;
-                draw(ui, value.index - 1);
+                draw(ui, index);
                 let end = ui.next_widget_position().y;
-                value.index -= 1;
-                value.pixel_offset += end - begin;
+                if end > max_rect.bottom() {
+                    break;
+                }
+                if end < absolute_begin && value.index < len {
+                    value.index += 1;
+                    let size = end - begin;
+                    value.pixel_offset -= size;
+                }
             }
         });
+
+        // this messes up the drawing of the main content, idk why, so put it after
+        if value.pixel_offset < 0.0 && value.index > 0 {
+            ui.scope_builder(UiBuilder::new().sizing_pass().invisible(), |ui| {
+                while value.pixel_offset < 0.0 && value.index > 0 {
+                    let begin = ui.next_widget_position().y;
+                    draw(ui, value.index - 1);
+                    let end = ui.next_widget_position().y;
+                    value.index -= 1;
+                    value.pixel_offset += end - begin;
+                }
+            });
+        }
     }
 }
 
@@ -736,7 +748,7 @@ impl<'b> Message<'b> {
             if let Some(exit) = self.exit
                 && ui.button("jump to exit").clicked()
             {
-                app_state.scroll_value = ScrollValue {
+                app_state.scroll_value = scroller::ScrollValue {
                     index: exit.get(),
                     pixel_offset: 0.0,
                 }
@@ -750,7 +762,7 @@ impl<'b> Message<'b> {
                     })
                     .clicked()
             {
-                app_state.scroll_value = ScrollValue {
+                app_state.scroll_value = scroller::ScrollValue {
                     index: parent,
                     pixel_offset: 0.0,
                 }

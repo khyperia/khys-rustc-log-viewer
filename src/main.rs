@@ -190,10 +190,17 @@ impl<'b> App<'b> {
         let ui_has_been_notified = Arc::new(AtomicBool::new(false));
         let atomic_bool = ui_has_been_notified.clone();
         let egui_ctx = cc.egui_ctx.clone();
-        let messages_reader = read_lines(bump, scope, data_source, move || {
-            if !atomic_bool.swap(true, Ordering::Relaxed) {
-                egui_ctx.request_repaint();
-            }
+        let (send, messages_reader) = mpsc::channel();
+        scope.spawn(move || {
+            data_source.parse(
+                bump,
+                move || {
+                    if !atomic_bool.swap(true, Ordering::Relaxed) {
+                        egui_ctx.request_repaint();
+                    }
+                },
+                send,
+            )
         });
         App {
             messages: vec![],
@@ -387,19 +394,6 @@ impl eframe::App for App<'_> {
             self.state.scroll_value = scroller::Value::at_index(index);
         }
     }
-}
-
-fn read_lines<'b: 'scope, 'scope, 'env>(
-    bump: &'b mut Bump,
-    scope: &'scope std::thread::Scope<'scope, 'env>,
-    data_source: DataSource,
-    notify_ui_thread: impl Fn() + Send + 'static,
-) -> Receiver<message::Message<'b>> {
-    let (send, recv) = mpsc::channel();
-
-    scope.spawn(move || data_source.parse(bump, notify_ui_thread, send));
-
-    recv
 }
 
 #[derive(PartialEq, Eq)]

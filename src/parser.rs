@@ -1,10 +1,11 @@
-use super::{JsonMap, LinkedList, ParsedMessage, Span};
 use bumpalo::Bump;
 use std::{
     error::Error,
     fmt::{self, Display, Formatter},
     str::Chars,
 };
+
+use crate::HopMessageKind;
 
 #[derive(Debug)]
 pub struct ParseError {
@@ -272,5 +273,80 @@ fn expect(iter: &mut Chars, ch: char) -> Result<(), InnerParseError<'static>> {
         }
     } else {
         Err(InnerParseError::UnexpectedCharSingle(ch, '\0'))
+    }
+}
+
+#[derive(Default)]
+pub struct ParsedMessage<'b> {
+    pub timestamp: &'b str,
+    pub level: &'b str,
+    pub fields: &'b JsonMap<'b>,
+    pub target: &'b str,
+    pub filename: &'b str,
+    pub line_number: &'b str,
+    pub span: Span<'b>,
+    pub spans: &'b LinkedList<'b, Span<'b>>,
+}
+
+impl ParsedMessage<'_> {
+    pub fn hop_message(&self) -> Option<HopMessageKind> {
+        if let JsonMap::Cons {
+            next: JsonMap::Empty,
+            item: ("message", value),
+        } = *self.fields
+        {
+            match value {
+                "enter" => Some(HopMessageKind::Enter),
+                "exit" => Some(HopMessageKind::Exit),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct Span<'b> {
+    pub name: Option<&'b str>,
+    pub map: &'b JsonMap<'b>,
+}
+
+pub enum LinkedList<'b, T> {
+    Empty,
+    Cons {
+        next: &'b LinkedList<'b, T>,
+        item: T,
+    },
+}
+
+pub type JsonMap<'b> = LinkedList<'b, (&'b str, &'b str)>;
+
+impl<'b, T> LinkedList<'b, T> {
+    pub fn iter(&'b self) -> LinkedListIter<'b, T> {
+        LinkedListIter { entry: self }
+    }
+}
+
+impl<'b, T> Default for &'b LinkedList<'b, T> {
+    fn default() -> Self {
+        &LinkedList::Empty
+    }
+}
+
+pub struct LinkedListIter<'b, T> {
+    entry: &'b LinkedList<'b, T>,
+}
+
+impl<'b, T> Iterator for LinkedListIter<'b, T> {
+    type Item = &'b T;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.entry {
+            LinkedList::Empty => None,
+            LinkedList::Cons { next, item } => {
+                self.entry = *next;
+                Some(item)
+            }
+        }
     }
 }

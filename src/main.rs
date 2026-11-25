@@ -21,7 +21,10 @@ use std::{
     time::Instant,
 };
 
-use crate::filter::{Filter, FilterKind};
+use crate::{
+    filter::{Filter, FilterKind},
+    parser::{JsonMap, LinkedList, ParsedMessage, Span},
+};
 
 mod filter;
 mod parser;
@@ -898,80 +901,5 @@ impl Appendable for String {
 impl Appendable for LayoutJob {
     fn append(&mut self, text: &str, leading_space: f32, format: TextFormat) {
         self.append(text, leading_space, format);
-    }
-}
-
-#[derive(Default)]
-struct ParsedMessage<'b> {
-    timestamp: &'b str,
-    level: &'b str,
-    fields: &'b JsonMap<'b>,
-    target: &'b str,
-    filename: &'b str,
-    line_number: &'b str,
-    span: Span<'b>,
-    spans: &'b LinkedList<'b, Span<'b>>,
-}
-
-impl ParsedMessage<'_> {
-    fn hop_message(&self) -> Option<HopMessageKind> {
-        if let JsonMap::Cons {
-            next: JsonMap::Empty,
-            item: ("message", value),
-        } = *self.fields
-        {
-            match value {
-                "enter" => Some(HopMessageKind::Enter),
-                "exit" => Some(HopMessageKind::Exit),
-                _ => None,
-            }
-        } else {
-            None
-        }
-    }
-}
-
-#[derive(Default)]
-struct Span<'b> {
-    name: Option<&'b str>,
-    map: &'b JsonMap<'b>,
-}
-
-enum LinkedList<'b, T> {
-    Empty,
-    Cons {
-        next: &'b LinkedList<'b, T>,
-        item: T,
-    },
-}
-
-type JsonMap<'b> = LinkedList<'b, (&'b str, &'b str)>;
-
-impl<'b, T> LinkedList<'b, T> {
-    fn iter(&'b self) -> LinkedListIter<'b, T> {
-        LinkedListIter { entry: self }
-    }
-}
-
-impl<'b, T> Default for &'b LinkedList<'b, T> {
-    fn default() -> Self {
-        &LinkedList::Empty
-    }
-}
-
-struct LinkedListIter<'b, T> {
-    entry: &'b LinkedList<'b, T>,
-}
-
-impl<'b, T> Iterator for LinkedListIter<'b, T> {
-    type Item = &'b T;
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.entry {
-            LinkedList::Empty => None,
-            LinkedList::Cons { next, item } => {
-                self.entry = *next;
-                Some(item)
-            }
-        }
     }
 }

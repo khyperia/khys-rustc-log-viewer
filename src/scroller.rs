@@ -1,12 +1,12 @@
 use eframe::egui::{InputState, Key, Modifiers, Ui, UiBuilder};
 
 #[derive(Default, Clone, PartialEq)]
-pub struct ScrollValue {
+pub struct Value {
     pub index: usize,
     pub pixel_offset: f32,
 }
 
-pub fn clamp_scroller(value: &mut ScrollValue, len: usize) {
+pub fn clamp(value: &mut Value, len: usize) {
     if value.index == 0 && value.pixel_offset < 0.0 {
         value.pixel_offset = 0.0;
     }
@@ -15,18 +15,13 @@ pub fn clamp_scroller(value: &mut ScrollValue, len: usize) {
     }
 }
 
-pub fn scroller_mouse_input(input: &mut InputState, value: &mut ScrollValue) {
+pub fn mouse_input(input: &mut InputState, value: &mut Value) {
     let scroll_mult = -4.0; // inverted?
     value.pixel_offset += input.smooth_scroll_delta.y * scroll_mult;
     input.smooth_scroll_delta.y = 0.0;
 }
 
-pub fn scroller_key_input(
-    input: &mut InputState,
-    value: &mut ScrollValue,
-    len: usize,
-    ui_height: f32,
-) {
+pub fn key_input(input: &mut InputState, value: &mut Value, len: usize, ui_height: f32) {
     if input.consume_key(Modifiers::NONE, Key::J) {
         value.pixel_offset += 20.0; // TODO: how to get line height?
     }
@@ -53,12 +48,7 @@ pub fn scroller_key_input(
     }
 }
 
-pub fn big_scroller(
-    ui: &mut Ui,
-    value: &mut ScrollValue,
-    len: usize,
-    mut draw: impl FnMut(&mut Ui, usize),
-) {
+pub fn big(ui: &mut Ui, value: &mut Value, len: usize, mut draw: impl FnMut(&mut Ui, usize)) {
     ui.scope(|ui| {
         let max_rect = ui.max_rect();
         let absolute_begin = ui.next_widget_position().y;

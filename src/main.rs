@@ -195,7 +195,7 @@ struct App<'b> {
 
 #[derive(Default)]
 struct AppState {
-    scroll_value: scroller::ScrollValue,
+    scroll_value: scroller::Value,
     entering_search_text: bool,
     search: String,
     search_onscreen: bool,
@@ -308,13 +308,13 @@ impl eframe::App for App<'_> {
 
         let mut opened_search = false;
         ui.input_mut(|input| {
-            scroller::scroller_mouse_input(input, &mut self.state.scroll_value);
+            scroller::mouse_input(input, &mut self.state.scroll_value);
             if self.state.entering_search_text {
                 if input.consume_key(Modifiers::NONE, Key::Escape) {
                     self.state.entering_search_text = false;
                 }
             } else {
-                scroller::scroller_key_input(
+                scroller::key_input(
                     input,
                     &mut self.state.scroll_value,
                     self.messages.len(),
@@ -345,7 +345,7 @@ impl eframe::App for App<'_> {
                 }
             }
         });
-        scroller::clamp_scroller(&mut self.state.scroll_value, self.messages.len());
+        scroller::clamp(&mut self.state.scroll_value, self.messages.len());
         let mut ensure_search_onscreen = false;
         if self.state.entering_search_text || !self.state.search.is_empty() {
             Panel::bottom("search panel").show_inside(ui, |ui| {
@@ -409,7 +409,7 @@ impl eframe::App for App<'_> {
         panel.show_inside(ui, |ui| {
             let old_scroll = self.state.scroll_value.clone();
             let mut big_adjusted_scroll = old_scroll.clone();
-            scroller::big_scroller(
+            scroller::big(
                 ui,
                 &mut big_adjusted_scroll,
                 self.messages.len(),
@@ -648,7 +648,7 @@ impl<'b> Message<'b> {
             if let Some(exit) = self.exit
                 && ui.button("jump to exit").clicked()
             {
-                app_state.scroll_value = scroller::ScrollValue {
+                app_state.scroll_value = scroller::Value {
                     index: exit.get(),
                     pixel_offset: 0.0,
                 }
@@ -662,7 +662,7 @@ impl<'b> Message<'b> {
                     })
                     .clicked()
             {
-                app_state.scroll_value = scroller::ScrollValue {
+                app_state.scroll_value = scroller::Value {
                     index: parent,
                     pixel_offset: 0.0,
                 }

@@ -1,7 +1,6 @@
 use super::{
-    AppState, Appendable, COLON_COLON, FIELD_KEYS, FIELD_VALUES, FILENAME, HLSEARCH,
-    HopMessageKind, INDENT, LOGPARSE_CONFIG, SPAN, SPAN_KEYS, SPAN_NAME, TARGET, TIMESTAMP,
-    dict_matches_search,
+    AppState, COLON_COLON, FIELD_KEYS, FIELD_VALUES, FILENAME, HLSEARCH, HopMessageKind, INDENT,
+    LOGPARSE_CONFIG, SPAN, SPAN_KEYS, SPAN_NAME, TARGET, TIMESTAMP, dict_matches_search,
     filter::{Filter, FilterKind},
     log_level_color, logparse_color,
     parser::{JsonMap, LinkedList, ParsedMessage},
@@ -9,7 +8,7 @@ use super::{
 };
 use bumpalo::Bump;
 use eframe::egui::{
-    Color32, Frame, Ui, UiBuilder,
+    Color32, Frame, TextFormat, Ui, UiBuilder,
     text::{LayoutJob, LayoutSection},
 };
 use std::num::NonZeroUsize;
@@ -368,5 +367,21 @@ impl<'b> Message<'b> {
             }
             i += 1;
         }
+    }
+}
+
+pub trait Appendable {
+    fn append(&mut self, text: &str, leading_space: f32, format: TextFormat);
+}
+
+impl Appendable for String {
+    fn append(&mut self, text: &str, _leading_space: f32, _format: TextFormat) {
+        self.push_str(text);
+    }
+}
+
+impl Appendable for LayoutJob {
+    fn append(&mut self, text: &str, leading_space: f32, format: TextFormat) {
+        self.append(text, leading_space, format);
     }
 }

@@ -1,10 +1,7 @@
 use bumpalo::Bump;
 use eframe::{
     CreationContext, NativeOptions,
-    egui::{
-        CentralPanel, Color32, FontId, Frame, Key, Modifiers, Panel, TextFormat, Ui,
-        text::LayoutJob,
-    },
+    egui::{CentralPanel, Color32, FontId, Frame, Key, Modifiers, Panel, TextFormat, Ui},
     egui_wgpu,
 };
 use std::{
@@ -535,20 +532,4 @@ fn dict_matches_search(map: &JsonMap, search: &str) -> bool {
 enum HopMessageKind {
     Enter,
     Exit,
-}
-
-trait Appendable {
-    fn append(&mut self, text: &str, leading_space: f32, format: TextFormat);
-}
-
-impl Appendable for String {
-    fn append(&mut self, text: &str, _leading_space: f32, _format: TextFormat) {
-        self.push_str(text);
-    }
-}
-
-impl Appendable for LayoutJob {
-    fn append(&mut self, text: &str, leading_space: f32, format: TextFormat) {
-        self.append(text, leading_space, format);
-    }
 }

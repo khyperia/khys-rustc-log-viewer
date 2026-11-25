@@ -1,5 +1,6 @@
-use super::{DataSource, SocketDataSource};
 use std::{net::ToSocketAddrs as _, path::PathBuf};
+
+use crate::parser::{DataSource, SocketDataSource};
 
 pub fn parse_cmdline() -> Option<DataSource> {
     let mut args = std::env::args().skip(1);

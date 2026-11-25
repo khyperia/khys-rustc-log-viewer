@@ -2,10 +2,15 @@ use bumpalo::Bump;
 use std::{
     error::Error,
     fmt::{self, Display, Formatter},
+    fs::File,
+    io::{BufRead as _, BufReader, Read},
+    net::{SocketAddr, TcpListener},
+    path::PathBuf,
     str::Chars,
+    sync::mpsc::{SendError, Sender},
 };
 
-use crate::HopMessageKind;
+use crate::{HopMessageKind, message::Message};
 
 #[derive(Debug)]
 pub struct ParseError {
@@ -362,4 +367,71 @@ impl<'b, T> Iterator for LinkedListIter<'b, T> {
             }
         }
     }
+}
+
+pub enum DataSource {
+    File(PathBuf),
+    Socket(SocketDataSource),
+}
+
+impl DataSource {
+    pub fn parse<'b>(
+        self,
+        bump: &'b mut Bump,
+        notify_ui_thread: impl Fn() + Send + 'static,
+        send: Sender<Message<'b>>,
+    ) {
+        match self {
+            DataSource::File(path) => {
+                let file = File::open(path).unwrap();
+                parse_from_reader(bump, notify_ui_thread, send, file)
+            }
+            DataSource::Socket(addr) => {
+                let listener = TcpListener::bind(addr.socket_addr.as_slice()).unwrap();
+                let child = addr.fork_after_listen.first().map(|cmd| {
+                    std::process::Command::new(cmd)
+                        .args(&addr.fork_after_listen[1..])
+                        .spawn()
+                        .expect("couldn't spawn fork-after-tcp process")
+                });
+                let (stream, _) = listener.accept().unwrap();
+                drop(listener);
+                parse_from_reader(bump, notify_ui_thread, send, stream);
+                if let Some(mut child) = child {
+                    child.kill().expect("couldn't kill fork-after-tcp process")
+                }
+            }
+        }
+    }
+}
+
+fn parse_from_reader<'b>(
+    bump: &'b mut Bump,
+    notify_ui_thread: impl Fn() + Send + 'static,
+    send: Sender<Message<'b>>,
+    reader: impl Read,
+) {
+    let mut reader = BufReader::new(reader);
+    let mut parent_stack = vec![];
+    let mut i = 0;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let bytes_read = reader.read_line(&mut line).unwrap();
+        if bytes_read == 0 {
+            break;
+        }
+        let message = Message::new(bump, &line, i, &mut parent_stack).unwrap();
+        match send.send(message) {
+            Ok(()) => (),
+            Err(SendError(_)) => break,
+        }
+        notify_ui_thread();
+        i += 1;
+    }
+}
+
+pub struct SocketDataSource {
+    pub socket_addr: std::vec::IntoIter<SocketAddr>,
+    pub fork_after_listen: Vec<String>,
 }

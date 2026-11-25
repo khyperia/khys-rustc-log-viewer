@@ -8,7 +8,7 @@ use super::{
 };
 use bumpalo::Bump;
 use eframe::egui::{
-    Color32, Frame, TextFormat, Ui, UiBuilder,
+    Color32, FontId, Frame, TextFormat, Ui, UiBuilder,
     text::{LayoutJob, LayoutSection},
 };
 use std::num::NonZeroUsize;

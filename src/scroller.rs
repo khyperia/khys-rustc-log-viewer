@@ -2,8 +2,21 @@ use eframe::egui::{InputState, Key, Modifiers, Ui, UiBuilder};
 
 #[derive(Default, Clone, PartialEq)]
 pub struct Value {
-    pub index: usize,
-    pub pixel_offset: f32,
+    index: usize,
+    pixel_offset: f32,
+}
+
+impl Value {
+    pub fn at_index(index: usize) -> Value {
+        Value {
+            index,
+            pixel_offset: 0.,
+        }
+    }
+
+    pub fn index(&self) -> usize {
+        self.index
+    }
 }
 
 pub fn clamp(value: &mut Value, len: usize) {

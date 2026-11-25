@@ -330,17 +330,16 @@ impl eframe::App for App<'_> {
                         self.state.search = String::new();
                     }
                     if input.consume_key(Modifiers::SHIFT, Key::N)
-                        && let Some(index) = self.prev_search(self.state.scroll_value.index)
+                        && let Some(index) = self.prev_search(self.state.scroll_value.index())
                     {
-                        self.state.scroll_value.index = index;
-                        self.state.scroll_value.pixel_offset = 0.0;
+                        self.state.scroll_value = scroller::Value::at_index(index);
                     }
                     if input.consume_key(Modifiers::NONE, Key::N)
-                        && let Some(index) = self
-                            .next_search((self.state.scroll_value.index + 1) % self.messages.len())
+                        && let Some(index) = self.next_search(
+                            (self.state.scroll_value.index() + 1) % self.messages.len(),
+                        )
                     {
-                        self.state.scroll_value.index = index;
-                        self.state.scroll_value.pixel_offset = 0.0;
+                        self.state.scroll_value = scroller::Value::at_index(index);
                     }
                 }
             }
@@ -436,10 +435,9 @@ impl eframe::App for App<'_> {
         if !self.state.search.is_empty()
             && !self.state.search_onscreen
             && ensure_search_onscreen
-            && let Some(index) = self.next_search(self.state.scroll_value.index)
+            && let Some(index) = self.next_search(self.state.scroll_value.index())
         {
-            self.state.scroll_value.index = index;
-            self.state.scroll_value.pixel_offset = 0.0;
+            self.state.scroll_value = scroller::Value::at_index(index);
         }
     }
 }
@@ -648,10 +646,7 @@ impl<'b> Message<'b> {
             if let Some(exit) = self.exit
                 && ui.button("jump to exit").clicked()
             {
-                app_state.scroll_value = scroller::Value {
-                    index: exit.get(),
-                    pixel_offset: 0.0,
-                }
+                app_state.scroll_value = scroller::Value::at_index(exit.get());
             }
             if let Some(parent) = self.parent
                 && ui
@@ -662,10 +657,7 @@ impl<'b> Message<'b> {
                     })
                     .clicked()
             {
-                app_state.scroll_value = scroller::Value {
-                    index: parent,
-                    pixel_offset: 0.0,
-                }
+                app_state.scroll_value = scroller::Value::at_index(parent);
             }
         });
     }

@@ -1,4 +1,4 @@
-use super::Message;
+use super::message::Message;
 use eframe::egui::{ComboBox, Ui};
 use serde::{Deserialize, Serialize};
 use std::{

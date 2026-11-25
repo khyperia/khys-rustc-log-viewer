@@ -18,10 +18,7 @@ use std::{
     time::Instant,
 };
 
-use crate::{
-    filter::Filter,
-    parser::{JsonMap, Span},
-};
+use crate::filter::Filter;
 
 mod filter;
 mod message;
@@ -517,15 +514,6 @@ fn text_format_color(color: Color32) -> TextFormat {
         color,
         ..text_format()
     }
-}
-
-fn span_matches_search(map: &Span, search: &str) -> bool {
-    map.name.is_some_and(|n| n.contains(search)) || dict_matches_search(map.map, search)
-}
-
-fn dict_matches_search(map: &JsonMap, search: &str) -> bool {
-    map.iter()
-        .any(|(k, v)| k.contains(search) || v.contains(search))
 }
 
 #[derive(PartialEq, Eq)]

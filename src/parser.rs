@@ -312,6 +312,12 @@ pub struct Span<'b> {
     pub map: &'b JsonMap<'b>,
 }
 
+impl Span<'_> {
+    pub fn matches_search(&self, search: &str) -> bool {
+        self.name.is_some_and(|n| n.contains(search)) || self.map.matches_search(search)
+    }
+}
+
 pub enum LinkedList<'b, T> {
     Empty,
     Cons {
@@ -321,6 +327,13 @@ pub enum LinkedList<'b, T> {
 }
 
 pub type JsonMap<'b> = LinkedList<'b, (&'b str, &'b str)>;
+
+impl JsonMap<'_> {
+    pub fn matches_search(&self, search: &str) -> bool {
+        self.iter()
+            .any(|(k, v)| k.contains(search) || v.contains(search))
+    }
+}
 
 impl<'b, T> LinkedList<'b, T> {
     pub fn iter(&'b self) -> LinkedListIter<'b, T> {

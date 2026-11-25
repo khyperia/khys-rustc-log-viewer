@@ -1,10 +1,10 @@
 use super::{
     AppState, COLON_COLON, FIELD_KEYS, FIELD_VALUES, FILENAME, HLSEARCH, HopMessageKind, INDENT,
-    LOGPARSE_CONFIG, SPAN, SPAN_KEYS, SPAN_NAME, TARGET, TIMESTAMP, dict_matches_search,
+    LOGPARSE_CONFIG, SPAN, SPAN_KEYS, SPAN_NAME, TARGET, TIMESTAMP,
     filter::{Filter, FilterKind},
     log_level_color, logparse_color,
     parser::{JsonMap, LinkedList, ParsedMessage},
-    scroller, span_matches_search, text_format, text_format_color,
+    scroller, text_format, text_format_color,
 };
 use bumpalo::Bump;
 use eframe::egui::{
@@ -322,13 +322,9 @@ impl<'b> Message<'b> {
             || self.parsed.target.contains(search)
             || self.parsed.filename.contains(search)
             || self.parsed.line_number.contains(search)
-            || dict_matches_search(self.parsed.fields, search)
-            || span_matches_search(&self.parsed.span, search)
-            || self
-                .parsed
-                .spans
-                .iter()
-                .any(|m| span_matches_search(m, search))
+            || self.parsed.fields.matches_search(search)
+            || self.parsed.span.matches_search(search)
+            || self.parsed.spans.iter().any(|m| m.matches_search(search))
     }
 
     fn handle_search(app_state: &AppState, job: &mut LayoutJob) -> bool {

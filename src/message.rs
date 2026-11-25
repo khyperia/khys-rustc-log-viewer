@@ -1,8 +1,6 @@
 use super::{
-    AppState, COLON_COLON, FIELD_KEYS, FIELD_VALUES, FILENAME, HLSEARCH, HopMessageKind, INDENT,
-    LOGPARSE_CONFIG, SPAN, SPAN_KEYS, SPAN_NAME, TARGET, TIMESTAMP,
+    AppState,
     filter::{Filter, FilterKind},
-    log_level_color, logparse_color,
     parser::{JsonMap, LinkedList, ParsedMessage},
     scroller,
 };
@@ -12,6 +10,59 @@ use eframe::egui::{
     text::{LayoutJob, LayoutSection},
 };
 use std::num::NonZeroUsize;
+
+#[allow(dead_code)]
+mod alacritty {
+    use eframe::egui::Color32;
+
+    // colors copied from (and inspired by/derived from) alacritty's default scheme:
+    // https://github.com/alacritty/alacritty/blob/f99dc71708d31d5c32d4b3fa611f9a87bf22657e/alacritty/src/config/color.rs#L204-L211
+    pub const BLACK: Color32 = Color32::from_rgb(0x18, 0x18, 0x18);
+    pub const RED: Color32 = Color32::from_rgb(0xac, 0x42, 0x42);
+    pub const GREEN: Color32 = Color32::from_rgb(0x90, 0xa9, 0x59);
+    pub const YELLOW: Color32 = Color32::from_rgb(0xf4, 0xbf, 0x75);
+    pub const BLUE: Color32 = Color32::from_rgb(0x6a, 0x9f, 0xb5);
+    pub const MAGENTA: Color32 = Color32::from_rgb(0xaa, 0x75, 0x9f);
+    pub const CYAN: Color32 = Color32::from_rgb(0x75, 0xb5, 0xaa);
+    pub const WHITE: Color32 = Color32::from_rgb(0xd8, 0xd8, 0xd8);
+
+    pub const BRIGHT_BLACK: Color32 = Color32::from_rgb(0x6b, 0x6b, 0x6b);
+    pub const BRIGHT_RED: Color32 = Color32::from_rgb(0xc5, 0x55, 0x55);
+    pub const BRIGHT_GREEN: Color32 = Color32::from_rgb(0xaa, 0xc4, 0x74);
+    pub const BRIGHT_YELLOW: Color32 = Color32::from_rgb(0xfe, 0xca, 0x88);
+    pub const BRIGHT_BLUE: Color32 = Color32::from_rgb(0x82, 0xb8, 0xc8);
+    pub const BRIGHT_MAGENTA: Color32 = Color32::from_rgb(0xc2, 0x8c, 0xb8);
+    pub const BRIGHT_CYAN: Color32 = Color32::from_rgb(0x93, 0xd3, 0xc3);
+    pub const BRIGHT_WHITE: Color32 = Color32::from_rgb(0xf8, 0xf8, 0xf8);
+
+    pub const DIM_BLACK: Color32 = Color32::from_rgb(0x0f, 0x0f, 0x0f);
+    pub const DIM_RED: Color32 = Color32::from_rgb(0x71, 0x2b, 0x2b);
+    pub const DIM_GREEN: Color32 = Color32::from_rgb(0x5f, 0x6f, 0x3a);
+    pub const DIM_YELLOW: Color32 = Color32::from_rgb(0xa1, 0x7e, 0x4d);
+    pub const DIM_BLUE: Color32 = Color32::from_rgb(0x45, 0x68, 0x77);
+    pub const DIM_MAGENTA: Color32 = Color32::from_rgb(0x70, 0x4d, 0x68);
+    pub const DIM_CYAN: Color32 = Color32::from_rgb(0x4d, 0x77, 0x70);
+    pub const DIM_WHITE: Color32 = Color32::from_rgb(0x8e, 0x8e, 0x8e);
+}
+
+const HLSEARCH: Color32 = Color32::from_rgb(0, 0x5c, 0x80);
+
+const SPAN: Color32 = alacritty::YELLOW;
+const SPAN_KEYS: Color32 = alacritty::YELLOW;
+const FIELD_KEYS: Color32 = alacritty::DIM_WHITE;
+const FIELD_VALUES: Color32 = alacritty::WHITE;
+const TARGET: Color32 = alacritty::CYAN;
+const COLON_COLON: Color32 = alacritty::WHITE;
+const SPAN_NAME: Color32 = alacritty::GREEN;
+const TIMESTAMP: Color32 = alacritty::DIM_WHITE;
+const FILENAME: Color32 = alacritty::DIM_WHITE;
+
+const INDENT: f32 = 8.0;
+
+const LOGPARSE_CONFIG: logparse::Config = logparse::Config {
+    collapse_space: false,
+    pretty_print: None,
+};
 
 pub struct Message<'b> {
     pub parsed: ParsedMessage<'b>,
@@ -397,4 +448,36 @@ fn text_format_color(color: Color32) -> TextFormat {
         color,
         ..text_format()
     }
+}
+
+fn logparse_color(kind: logparse::SpanKind) -> Color32 {
+    match kind {
+        logparse::SpanKind::Number | logparse::SpanKind::Literal | logparse::SpanKind::Lifetime => {
+            alacritty::CYAN
+        }
+        logparse::SpanKind::String => alacritty::YELLOW,
+        logparse::SpanKind::Constructor => alacritty::BLUE,
+        logparse::SpanKind::Surroundings => alacritty::DIM_CYAN,
+        logparse::SpanKind::Separator | logparse::SpanKind::Path => alacritty::DIM_WHITE,
+        logparse::SpanKind::Delimiter(_)
+        | logparse::SpanKind::Space(_)
+        | logparse::SpanKind::Text => alacritty::WHITE,
+    }
+}
+
+fn log_level_color(level: &str) -> Color32 {
+    match level {
+        "TRACE" => alacritty::MAGENTA,
+        "DEBUG" => alacritty::BLUE,
+        "INFO" => alacritty::GREEN,
+        "WARN" => alacritty::BRIGHT_YELLOW,
+        "ERROR" => alacritty::BRIGHT_RED,
+        _ => alacritty::RED,
+    }
+}
+
+#[derive(PartialEq, Eq)]
+pub enum HopMessageKind {
+    Enter,
+    Exit,
 }
